@@ -1,39 +1,28 @@
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-#include <strings.h>
-#include <signal.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <limits.h>
-#include <ctype.h>
-#include <time.h>
-#include <sys/select.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <sys/stat.h>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <pwd.h>
-#include <libgen.h>
+#include "util.h"
+
 #include <termkey.h>
 
-#include "vis.h"
-#include "text-util.h"
-#include "text-motions.h"
-#include "text-objects.h"
-#include "util.h"
 #include "vis-core.h"
-#include "sam.h"
-#include "ui.h"
 #include "vis-subprocess.h"
 
+#include "util.c"
 
-static void macro_replay(Vis *vis, const Macro *macro);
-static void macro_replay_internal(Vis *vis, const Macro *macro);
-static void vis_keys_push(Vis *vis, const char *input, size_t pos, bool record);
+#include "buffer.c"
+#include "event-basic.c"
+#include "map.c"
+#include "sam.c"
+#include "text.c"
+#include "ui-terminal.c"
+#include "view.c"
+#include "vis-lua.c"
+#include "vis-marks.c"
+#include "vis-modes.c"
+#include "vis-motions.c"
+#include "vis-operators.c"
+#include "vis-prompt.c"
+#include "vis-registers.c"
+#include "vis-subprocess.c"
+#include "vis-text-objects.c"
 
 /** window / file handling */
 
@@ -44,9 +33,10 @@ static void file_free(Vis *vis, File *file) {
 		--file->refcount;
 		return;
 	}
-	vis_event_emit(vis, VIS_EVENT_FILE_CLOSE, file);
+	if (!file->internal)
+		vis_event_emit(vis, VIS_EVENT_FILE_CLOSE, file);
 	for (size_t i = 0; i < LENGTH(file->marks); i++)
-		mark_release(&file->marks[i]);
+		da_release(file->marks + i);
 	text_free(file->text);
 	free((char*)file->name);
 
@@ -66,40 +56,11 @@ static File *file_new_text(Vis *vis, Text *text) {
 	file->fd = -1;
 	file->text = text;
 	file->stat = text_stat(text);
-	for (size_t i = 0; i < LENGTH(file->marks); i++)
-		mark_init(&file->marks[i]);
 	if (vis->files)
 		vis->files->prev = file;
 	file->next = vis->files;
 	vis->files = file;
 	return file;
-}
-
-char *absolute_path(const char *name) {
-	if (!name)
-		return NULL;
-	char *copy1 = strdup(name);
-	char *copy2 = strdup(name);
-	char *path_absolute = NULL;
-	char path_normalized[PATH_MAX] = "";
-
-	if (!copy1 || !copy2)
-		goto err;
-
-	char *dir = dirname(copy1);
-	char *base = basename(copy2);
-	if (!(path_absolute = realpath(dir, NULL)))
-		goto err;
-	if (strcmp(path_absolute, "/") == 0)
-		path_absolute[0] = '\0';
-
-	snprintf(path_normalized, sizeof(path_normalized), "%s/%s",
-	         path_absolute, base);
-err:
-	free(copy1);
-	free(copy2);
-	free(path_absolute);
-	return path_normalized[0] ? strdup(path_normalized) : NULL;
 }
 
 static File *file_new(Vis *vis, const char *name, bool internal) {
@@ -137,9 +98,9 @@ static File *file_new(Vis *vis, const char *name, bool internal) {
 	}
 
 	File *file = NULL;
-	Text *text = text_load_method(name, vis->load_method);
+	Text *text = text_load_method(vis, name, vis->load_method);
 	if (!text && name && errno == ENOENT)
-		text = text_load(NULL);
+		text = text_load(vis, 0);
 	if (!text)
 		goto err;
 	if (!(file = file_new_text(vis, text)))
@@ -184,14 +145,14 @@ const char *file_name_get(File *file) {
 	return file->name[cwdlen] == '/' ? file->name+cwdlen+1 : file->name;
 }
 
-void window_selection_save(Win *win) {
+void window_selection_save(Win *win)
+{
 	Vis *vis = win->vis;
-	Array sel = view_selections_get_all(&win->view);
-	vis_mark_set(win, VIS_MARK_SELECTION, &sel);
-	array_release(&sel);
+	FilerangeList sel = view_selections_get_all(vis, &win->view);
+	vis_mark_set(vis, win, VIS_MARK_SELECTION, sel);
+	da_release(&sel);
 	vis_jumplist_save(vis);
 }
-
 
 static void window_free(Win *win) {
 	if (!win)
@@ -205,8 +166,9 @@ static void window_free(Win *win) {
 	view_free(&win->view);
 	for (size_t i = 0; i < LENGTH(win->modes); i++)
 		map_free(win->modes[i].bindings);
-	marklist_release(&win->jumplist);
-	mark_release(&win->saved_selections);
+	for (int i = 0; i < VIS_MARK_SET_LRU_COUNT; i++)
+		da_release(win->mark_set_lru_regions + i);
+	da_release(&win->saved_selections);
 	free(win);
 }
 
@@ -358,7 +320,8 @@ void vis_window_draw(Win *win) {
 		window_draw_selections(win);
 	window_draw_eof(win);
 
-	vis_event_emit(vis, VIS_EVENT_WIN_STATUS, win);
+	if (win->options & UI_OPTION_STATUSBAR)
+		vis_event_emit(vis, VIS_EVENT_WIN_STATUS, win);
 }
 
 
@@ -384,8 +347,7 @@ Win *window_new_file(Vis *vis, File *file, enum UiOption options) {
 		window_free(win);
 		return NULL;
 	}
-	marklist_init(&win->jumplist, 32);
-	mark_init(&win->saved_selections);
+
 	file->refcount++;
 	win_options_set(win, win->options);
 
@@ -564,28 +526,28 @@ void vis_window_close(Win *win) {
 	vis_draw(vis);
 }
 
-Vis *vis_new(void) {
-	Vis *vis = calloc(1, sizeof(Vis));
-	if (!vis)
-		return NULL;
-	vis->exit_status = -1;
-	if (!ui_terminal_init(&vis->ui)) {
-		free(vis);
-		return NULL;
+bool vis_init(Vis *vis)
+{
+	zero_struct(vis);
+
+	if (setjmp(vis->oom_jmp_buf)) {
+		/* NOTE: if we run out of memory here we haven't opened any real
+		 * files yet so it is safe to just cleanup and return. */
+		vis_cleanup(vis);
+		return false;
 	}
+
+	vis->exit_status = -1;
+	if (!ui_terminal_init(&vis->ui))
+		return false;
 	ui_init(&vis->ui, vis);
 	vis->change_colors = true;
 	for (size_t i = 0; i < LENGTH(vis->registers); i++)
-		register_init(&vis->registers[i]);
+		da_push(vis, vis->registers + i);
 	vis->registers[VIS_REG_BLACKHOLE].type = REGISTER_BLACKHOLE;
 	vis->registers[VIS_REG_CLIPBOARD].type = REGISTER_CLIPBOARD;
 	vis->registers[VIS_REG_PRIMARY].type = REGISTER_CLIPBOARD;
 	vis->registers[VIS_REG_NUMBER].type = REGISTER_NUMBER;
-	array_init(&vis->operators);
-	array_init(&vis->motions);
-	array_init(&vis->textobjects);
-	array_init(&vis->bindings);
-	array_init(&vis->actions_user);
 	action_reset(&vis->action);
 	vis->input_queue = (Buffer){0};
 	if (!(vis->command_file = file_new_internal(vis, NULL)))
@@ -611,33 +573,44 @@ Vis *vis_new(void) {
 	vis->mode_prev = vis->mode = &vis_modes[VIS_MODE_NORMAL];
 	vis_modes[VIS_MODE_INSERT].input  = vis_event_mode_insert_input;
 	vis_modes[VIS_MODE_REPLACE].input = vis_event_mode_replace_input;
-	return vis;
+	return true;
 err:
-	vis_free(vis);
-	return NULL;
+	vis_cleanup(vis);
+	return false;
 }
 
-void vis_free(Vis *vis) {
+void vis_cleanup(Vis *vis)
+{
 	if (!vis)
 		return;
 	while (vis->windows)
 		vis_window_close(vis->windows);
-	vis_event_emit(vis, VIS_EVENT_QUIT);
 	vis_process_waitall(vis);
+
+	// NOTE: it is possible for a plugin to call a lua function
+	// such as vis:message() in QUIT which requires the existence
+	// of vis' internal files. This must be emitted prior to
+	// the release of those files.
+	vis_event_emit(vis, VIS_EVENT_QUIT);
+
 	file_free(vis, vis->command_file);
 	file_free(vis, vis->search_file);
 	file_free(vis, vis->error_file);
-	for (int i = 0; i < LENGTH(vis->registers); i++)
-		register_release(&vis->registers[i]);
+
+	for (int i = 0; i < LENGTH(vis->registers); i++) {
+		for (VisDACount j = 0; j < vis->registers[i].count; j++)
+			buffer_release(vis->registers[i].data + j);
+		da_release(vis->registers + i);
+	}
 	ui_terminal_free(&vis->ui);
 	if (vis->usercmds) {
-		const char *name;
+		const char *name = 0;
 		while (map_first(vis->usercmds, &name) && vis_cmd_unregister(vis, name));
 	}
 	map_free(vis->usercmds);
 	map_free(vis->cmds);
 	if (vis->options) {
-		const char *name;
+		const char *name = 0;
 		while (map_first(vis->options, &name) && vis_option_unregister(vis, name));
 	}
 	map_free(vis->options);
@@ -646,24 +619,23 @@ void vis_free(Vis *vis) {
 	buffer_release(&vis->input_queue);
 	for (int i = 0; i < VIS_MODE_INVALID; i++)
 		map_free(vis_modes[i].bindings);
-	array_release_full(&vis->operators);
-	array_release_full(&vis->motions);
-	array_release_full(&vis->textobjects);
-	while (vis->bindings.len)
-		vis_binding_free(vis, array_get_ptr(&vis->bindings, 0));
-	array_release(&vis->bindings);
-	while (vis->actions_user.len)
-		vis_action_free(vis, array_get_ptr(&vis->actions_user, 0));
-	array_release(&vis->actions_user);
+	da_release(&vis->operators);
+	da_release(&vis->motions);
+	da_release(&vis->textobjects);
+	while (vis->bindings.count)
+		vis_binding_free(vis, vis->bindings.data[0]);
+	da_release(&vis->bindings);
+	for (VisDACount i = 0; i < vis->actions_user.count; i++)
+		keyaction_free(vis->actions_user.data[i]);
+	da_release(&vis->actions_user);
 	free(vis->shell);
-	free(vis);
 }
 
 void vis_insert(Vis *vis, size_t pos, const char *data, size_t len) {
 	Win *win = vis->win;
 	if (!win)
 		return;
-	text_insert(win->file->text, pos, data, len);
+	text_insert(vis, win->file->text, pos, data, len);
 	vis_window_invalidate(win);
 }
 
@@ -673,8 +645,10 @@ void vis_insert_key(Vis *vis, const char *data, size_t len) {
 		return;
 	for (Selection *s = view_selections(&win->view); s; s = view_selections_next(s)) {
 		size_t pos = view_cursors_pos(s);
-		vis_insert(vis, pos, data, len);
-		view_cursors_scroll_to(s, pos + len);
+		if (pos != EPOS) {
+			vis_insert(vis, pos, data, len);
+			view_cursors_scroll_to(s, pos + len);
+		}
 	}
 }
 
@@ -703,14 +677,6 @@ void vis_replace_key(Vis *vis, const char *data, size_t len) {
 	}
 }
 
-void vis_delete(Vis *vis, size_t pos, size_t len) {
-	Win *win = vis->win;
-	if (!win)
-		return;
-	text_delete(win->file->text, pos, len);
-	vis_window_invalidate(win);
-}
-
 bool vis_action_register(Vis *vis, const KeyAction *action) {
 	return map_put(vis->actions, action->name, action);
 }
@@ -721,14 +687,6 @@ bool vis_keymap_add(Vis *vis, const char *key, const char *mapping) {
 
 void vis_keymap_disable(Vis *vis) {
 	vis->keymap_disabled = true;
-}
-
-void vis_interrupt(Vis *vis) {
-	vis->interrupted = true;
-}
-
-bool vis_interrupt_requested(Vis *vis) {
-	return vis->interrupted;
 }
 
 void vis_do(Vis *vis) {
@@ -949,7 +907,7 @@ void vis_do(Vis *vis) {
 }
 
 void action_reset(Action *a) {
-	memset(a, 0, sizeof(*a));
+	zero_struct(a);
 	a->count = VIS_COUNT_UNKNOWN;
 }
 
@@ -1034,13 +992,15 @@ long vis_keys_codepoint(Vis *vis, const char *keys) {
 	return -1;
 }
 
-bool vis_keys_utf8(Vis *vis, const char *keys, char utf8[static UTFmax+1]) {
-	Rune rune = vis_keys_codepoint(vis, keys);
-	if (rune == (Rune)-1)
-		return false;
-	size_t len = runetochar(utf8, &rune);
-	utf8[len] = '\0';
-	return true;
+bool vis_keys_utf8(Vis *vis, const char *keys, char utf8[4+1])
+{
+	uint32_t cp = vis_keys_codepoint(vis, keys);
+	bool result = cp != -1;
+	if (result) {
+		size_t len = utf8_encode((unsigned char *)utf8, cp);
+		utf8[len] = 0;
+	}
+	return result;
 }
 
 typedef struct {
@@ -1164,6 +1124,44 @@ static void vis_keys_process(Vis *vis, size_t pos) {
 	buffer_remove(buf, keys - buf->data, end - keys);
 }
 
+static void vis_keys_push(Vis *vis, const char *input, size_t pos, bool record)
+{
+	if (!input)
+		return;
+	if (record && vis->recording)
+		macro_append(vis->recording, input);
+	if (vis->macro_operator)
+		macro_append(vis->macro_operator, input);
+	if (buffer_append0(&vis->input_queue, input))
+		vis_keys_process(vis, pos);
+}
+
+static void macro_replay_internal(Vis *vis, const Macro *macro)
+{
+	size_t pos = buffer_length0(&vis->input_queue);
+	for (char *key = macro->data, *next; key; key = next) {
+		char tmp;
+		next = (char*)vis_keys_next(vis, key);
+		if (next) {
+			tmp = *next;
+			*next = '\0';
+		}
+
+		vis_keys_push(vis, key, pos, false);
+
+		if (next)
+			*next = tmp;
+	}
+}
+
+static void macro_replay(Vis *vis, const Macro *macro)
+{
+	const Macro *replaying = vis->replaying;
+	vis->replaying = macro;
+	macro_replay_internal(vis, macro);
+	vis->replaying = replaying;
+}
+
 void vis_keys_feed(Vis *vis, const char *input) {
 	if (!input)
 		return;
@@ -1173,17 +1171,6 @@ void vis_keys_feed(Vis *vis, const char *input) {
 	/* use internal function, to keep Lua based tests which use undo points working */
 	macro_replay_internal(vis, &macro);
 	macro_release(&macro);
-}
-
-static void vis_keys_push(Vis *vis, const char *input, size_t pos, bool record) {
-	if (!input)
-		return;
-	if (record && vis->recording)
-		macro_append(vis->recording, input);
-	if (vis->macro_operator)
-		macro_append(vis->macro_operator, input);
-	if (buffer_append0(&vis->input_queue, input))
-		vis_keys_process(vis, pos);
 }
 
 static const char *getkey(Vis *vis) {
@@ -1254,6 +1241,13 @@ int vis_run(Vis *vis) {
 	if (vis->exit_status != -1)
 		return vis->exit_status;
 	vis->running = true;
+
+	if (setjmp(vis->oom_jmp_buf)) {
+		/* TODO: if we run out of memory here we may have files with unsaved changes.
+		 * ideally we need to try and save temporary versions somewhere for later recovery */
+		vis_cleanup(vis);
+		vis_die(vis, "vis: out of memory\n");
+	}
 
 	vis_event_emit(vis, VIS_EVENT_START);
 
@@ -1339,13 +1333,14 @@ int vis_run(Vis *vis) {
 	return vis->exit_status;
 }
 
-Macro *macro_get(Vis *vis, enum VisRegister id) {
+Macro *macro_get(Vis *vis, enum VisRegister id)
+{
 	if (id == VIS_MACRO_LAST_RECORDED)
 		return vis->last_recording;
 	if (VIS_REG_A <= id && id <= VIS_REG_Z)
 		id -= VIS_REG_A;
 	if (id < LENGTH(vis->registers))
-		return array_get(&vis->registers[id].values, 0);
+		return vis->registers[id].data;
 	return NULL;
 }
 
@@ -1372,7 +1367,6 @@ bool vis_macro_record(Vis *vis, enum VisRegister id) {
 	if (!(VIS_REG_A <= id && id <= VIS_REG_Z))
 		macro->len = 0;
 	vis->recording = macro;
-	vis_event_emit(vis, VIS_EVENT_WIN_STATUS, vis->win);
 	return true;
 }
 
@@ -1387,36 +1381,11 @@ bool vis_macro_record_stop(Vis *vis) {
 	}
 	vis->last_recording = vis->recording;
 	vis->recording = NULL;
-	vis_event_emit(vis, VIS_EVENT_WIN_STATUS, vis->win);
 	return true;
 }
 
 bool vis_macro_recording(Vis *vis) {
 	return vis->recording;
-}
-
-static void macro_replay(Vis *vis, const Macro *macro) {
-	const Macro *replaying = vis->replaying;
-	vis->replaying = macro;
-	macro_replay_internal(vis, macro);
-	vis->replaying = replaying;
-}
-
-static void macro_replay_internal(Vis *vis, const Macro *macro) {
-	size_t pos = buffer_length0(&vis->input_queue);
-	for (char *key = macro->data, *next; key; key = next) {
-		char tmp;
-		next = (char*)vis_keys_next(vis, key);
-		if (next) {
-			tmp = *next;
-			*next = '\0';
-		}
-
-		vis_keys_push(vis, key, pos, false);
-
-		if (next)
-			*next = tmp;
-	}
 }
 
 bool vis_macro_replay(Vis *vis, enum VisRegister id) {
@@ -1544,17 +1513,17 @@ size_t vis_text_insert_nl(Vis *vis, Text *txt, size_t pos) {
 		}
 	}
 
-	text_insert(txt, pos, "\n", 1);
+	text_insert(vis, txt, pos, "\n", 1);
 	if (eof) {
 		if (nl2)
-			text_insert(txt, text_size(txt), "\n", 1);
+			text_insert(vis, txt, text_size(txt), "\n", 1);
 		else
 			pos--; /* place cursor before, not after nl */
 	}
 	pos++;
 
 	if (indent)
-		text_insert(txt, pos, indent, indent_len);
+		text_insert(vis, txt, pos, indent, indent_len);
 	free(indent);
 	return pos + indent_len;
 }

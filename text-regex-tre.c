@@ -1,11 +1,3 @@
-#include <stdlib.h>
-#include <string.h>
-#include <wchar.h>
-#include <errno.h>
-
-#include "text-regex.h"
-#include "text-motions.h"
-
 struct Regex {
 	regex_t regex;
 	tre_str_source str_source;

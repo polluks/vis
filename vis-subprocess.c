@@ -1,12 +1,7 @@
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdbool.h>
-#include <errno.h>
-#include <string.h>
-#include <sys/wait.h>
+#include "util.h"
+
 #include "vis-lua.h"
 #include "vis-subprocess.h"
-#include "util.h"
 
 /* Pool of information about currently running subprocesses */
 static Process *process_pool;

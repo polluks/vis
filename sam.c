@@ -16,22 +16,7 @@
  * REPRESENTATION OR WARRANTY OF ANY KIND CONCERNING THE MERCHANTABILITY
  * OF THIS SOFTWARE OR ITS FITNESS FOR ANY PARTICULAR PURPOSE.
  */
-#include <string.h>
-#include <strings.h>
-#include <stdio.h>
-#include <ctype.h>
-#include <errno.h>
-#include <unistd.h>
-#include <limits.h>
-#include <fcntl.h>
-#include "sam.h"
 #include "vis-core.h"
-#include "buffer.h"
-#include "text.h"
-#include "text-motions.h"
-#include "text-objects.h"
-#include "text-regex.h"
-#include "util.h"
 
 #define MAX_ARGV 8
 
@@ -39,8 +24,8 @@ typedef struct Address Address;
 typedef struct Command Command;
 typedef struct CommandDef CommandDef;
 
-struct Change {
-	enum ChangeType {
+struct SamChange {
+	enum SamChangeType {
 		TRANSCRIPT_INSERT = 1 << 0,
 		TRANSCRIPT_DELETE = 1 << 1,
 		TRANSCRIPT_CHANGE = TRANSCRIPT_INSERT|TRANSCRIPT_DELETE,
@@ -50,7 +35,7 @@ struct Change {
 	Filerange range;   /* inserts are denoted by zero sized range (same start/end) */
 	const char *data;  /* will be free(3)-ed after transcript has been processed */
 	size_t len;        /* size in bytes of the chunk pointed to by data */
-	Change *next;      /* modification position increase monotonically */
+	SamChange *next;   /* modification position increase monotonically */
 	int count;         /* how often should data be inserted? */
 };
 
@@ -456,17 +441,17 @@ const char *sam_error(enum SamError err) {
 	return idx < LENGTH(error_msg) ? error_msg[idx] : NULL;
 }
 
-static void change_free(Change *c) {
+static void sam_change_free(SamChange *c) {
 	if (!c)
 		return;
 	free((char*)c->data);
 	free(c);
 }
 
-static Change *change_new(Transcript *t, enum ChangeType type, Filerange *range, Win *win, Selection *sel) {
+static SamChange *sam_change_new(Transcript *t, enum SamChangeType type, Filerange *range, Win *win, Selection *sel) {
 	if (!text_range_valid(range))
 		return NULL;
-	Change **prev, *next;
+	SamChange **prev, *next;
 	if (t->latest && t->latest->range.end <= range->start) {
 		prev = &t->latest->next;
 		next = t->latest->next;
@@ -482,7 +467,7 @@ static Change *change_new(Transcript *t, enum ChangeType type, Filerange *range,
 		t->error = SAM_ERR_CONFLICT;
 		return NULL;
 	}
-	Change *new = calloc(1, sizeof *new);
+	SamChange *new = calloc(1, sizeof *new);
 	if (new) {
 		new->type = type;
 		new->range = *range;
@@ -506,15 +491,15 @@ static bool sam_transcript_error(Transcript *t, enum SamError error) {
 }
 
 static void sam_transcript_free(Transcript *t) {
-	for (Change *c = t->changes, *next; c; c = next) {
+	for (SamChange *c = t->changes, *next; c; c = next) {
 		next = c->next;
-		change_free(c);
+		sam_change_free(c);
 	}
 }
 
 static bool sam_insert(Win *win, Selection *sel, size_t pos, const char *data, size_t len, int count) {
 	Filerange range = text_range_new(pos, pos);
-	Change *c = change_new(&win->file->transcript, TRANSCRIPT_INSERT, &range, win, sel);
+	SamChange *c = sam_change_new(&win->file->transcript, TRANSCRIPT_INSERT, &range, win, sel);
 	if (c) {
 		c->data = data;
 		c->len = len;
@@ -524,11 +509,11 @@ static bool sam_insert(Win *win, Selection *sel, size_t pos, const char *data, s
 }
 
 static bool sam_delete(Win *win, Selection *sel, Filerange *range) {
-	return change_new(&win->file->transcript, TRANSCRIPT_DELETE, range, win, sel);
+	return sam_change_new(&win->file->transcript, TRANSCRIPT_DELETE, range, win, sel);
 }
 
 static bool sam_change(Win *win, Selection *sel, Filerange *range, const char *data, size_t len, int count) {
-	Change *c = change_new(&win->file->transcript, TRANSCRIPT_CHANGE, range, win, sel);
+	SamChange *c = sam_change_new(&win->file->transcript, TRANSCRIPT_CHANGE, range, win, sel);
 	if (c) {
 		c->data = data;
 		c->len = len;
@@ -1066,11 +1051,10 @@ static Filerange address_evaluate(Address *addr, File *file, Selection *sel, Fil
 		case '\'':
 		{
 			size_t pos = EPOS;
-			Array *marks = &file->marks[addr->number];
-			size_t idx = sel ? view_selections_number(sel) : 0;
-			SelectionRegion *sr = array_get(marks, idx);
-			if (sr)
-				pos = text_mark_get(file->text, sr->cursor);
+			SelectionRegionList *marks = file->marks + addr->number;
+			VisDACount idx = sel ? view_selections_number(sel) : 0;
+			if (idx < marks->count)
+				pos = text_mark_get(file->text, marks->data[idx].cursor);
 			ret = text_range_new(pos, pos);
 			break;
 		}
@@ -1244,7 +1228,7 @@ enum SamError sam_cmd(Vis *vis, const char *s) {
 		}
 		vis_file_snapshot(vis, file);
 		ptrdiff_t delta = 0;
-		for (Change *c = t->changes; c; c = c->next) {
+		for (SamChange *c = t->changes; c; c = c->next) {
 			c->range.start += delta;
 			c->range.end += delta;
 			if (c->type & TRANSCRIPT_DELETE) {
@@ -1259,7 +1243,7 @@ enum SamError sam_cmd(Vis *vis, const char *s) {
 			}
 			if (c->type & TRANSCRIPT_INSERT) {
 				for (int i = 0; i < c->count; i++) {
-					text_insert(file->text, c->range.start, c->data, c->len);
+					text_insert(vis, file->text, c->range.start, c->data, c->len);
 					delta += c->len;
 				}
 				Filerange r = text_range_new(c->range.start,
@@ -1642,7 +1626,7 @@ static bool cmd_write(Vis *vis, Win *win, Command *cmd, const char *argv[], Sele
 		}
 
 		/* make sure the file is marked as saved i.e. not modified */
-		text_save(text, NULL);
+		text_mark_current_revision(text);
 		vis_event_emit(vis, VIS_EVENT_FILE_SAVE_POST, file, (char*)NULL);
 		return true;
 	}
@@ -1661,8 +1645,10 @@ static bool cmd_write(Vis *vis, Win *win, Command *cmd, const char *argv[], Sele
 	for (const char **name = argv[1] ? &argv[1] : (const char*[]){ filename, NULL }; *name; name++) {
 
 		char *path = absolute_path(*name);
-		if (!path)
+		if (!path) {
+			vis_info_show(vis, "Failed to resolve path '%s': %s", *name, strerror(errno));
 			return false;
+		}
 
 		struct stat meta;
 		bool existing_file = !stat(path, &meta);
@@ -1678,6 +1664,16 @@ static bool cmd_write(Vis *vis, Win *win, Command *cmd, const char *argv[], Sele
 				vis_info_show(vis, "WARNING: file exists");
 				goto err;
 			}
+			/* Check if the destination file exists and is read-only. This
+			 * is needed because vis' default save method uses mkstemp and
+			 * renameat(3p) to atomically replace the destination file.
+			 * This approach does work regardless the permissions of original
+			 * file, hence we do the check here.
+			 */
+			if (existing_file && !(meta.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH))) {
+				vis_info_show(vis, "WARNING: file is read-only");
+				goto err;
+			}
 		}
 
 		if (!vis_event_emit(vis, VIS_EVENT_FILE_SAVE_PRE, file, path) && cmd->flags != '!') {
@@ -1688,8 +1684,8 @@ static bool cmd_write(Vis *vis, Win *win, Command *cmd, const char *argv[], Sele
 		if (write_entire_file)
 			*r = text_range_new(0, text_size(text));
 
-		TextSave *ctx = text_save_begin(text, AT_FDCWD, path, file->save_method);
-		if (!ctx) {
+		TextSave ctx = text_save_default(.txt = text, .method = file->save_method, .filename = path);
+		if (!text_save_begin(&ctx)) {
 			const char *msg = errno ? strerror(errno) : "try changing `:set savemethod`";
 			vis_info_show(vis, "Can't write `%s': %s", path, msg);
 			goto err;
@@ -1700,18 +1696,19 @@ static bool cmd_write(Vis *vis, Win *win, Command *cmd, const char *argv[], Sele
 
 		for (Selection *s = view_selections(&win->view); s; s = view_selections_next(s)) {
 			Filerange range = visual ? view_selections_get(s) : *r;
-			ssize_t written = text_save_write_range(ctx, &range);
+			ssize_t written = text_save_write_range(&ctx, &range);
 			failure = (written == -1 || (size_t)written != text_range_size(&range));
-			if (failure) {
-				text_save_cancel(ctx);
-				break;
-			}
-
-			if (!visual)
+			if (failure || !visual)
 				break;
 		}
 
-		if (failure || !text_save_commit(ctx)) {
+		if (!failure) {
+			failure = !text_save_commit(&ctx);
+		} else {
+			text_save_cancel(&ctx);
+		}
+
+		if (failure) {
 			vis_info_show(vis, "Can't write `%s': %s", path, strerror(errno));
 			goto err;
 		}

@@ -1,24 +1,6 @@
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <wchar.h>
-#include <stdint.h>
-#include <libgen.h>
-#include <limits.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
+#include "util.h"
 
 #include "text.h"
-#include "text-util.h"
-#include "text-motions.h"
-#include "util.h"
-#include "array.h"
-#include "text-internal.h"
 
 /* A piece holds a reference (but doesn't itself store) a certain amount of data.
  * All active pieces chained together form the whole content of the document.
@@ -53,13 +35,13 @@ typedef struct {
 } Span;
 
 /* A Change keeps all needed information to redo/undo an insertion/deletion. */
-typedef struct Change Change;
-struct Change {
+typedef struct TextChange TextChange;
+struct TextChange {
 	Span old;               /* all pieces which are being modified/swapped out by the change */
 	Span new;               /* all pieces which are introduced/swapped in by the change */
 	size_t pos;             /* absolute position at which the change occurred */
-	Change *next;           /* next change which is part of the same revision */
-	Change *prev;           /* previous change which is part of the same revision */
+	TextChange *next;       /* next change which is part of the same revision */
+	TextChange *prev;       /* previous change which is part of the same revision */
 };
 
 /* A Revision is a list of Changes which are used to undo/redo all modifications
@@ -67,7 +49,7 @@ struct Change {
  */
 typedef struct Revision Revision;
 struct Revision {
-	Change *change;         /* the most recent change */
+	TextChange *change;     /* the most recent change */
 	Revision *next;         /* the next (child) revision in the undo tree */
 	Revision *prev;         /* the previous (parent) revision in the undo tree */
 	Revision *earlier;      /* the previous Revision, chronologically */
@@ -81,9 +63,29 @@ typedef struct {
 	size_t lineno;          /* line number in file i.e. number of '\n' in [0, pos) */
 } LineCache;
 
+/* Block holding the file content, either readonly mmap(2)-ed from the original
+ * file or heap allocated to store the modifications.
+ */
+typedef struct {
+	size_t size;               /* maximal capacity */
+	size_t len;                /* current used length / insertion position */
+	char *data;                /* actual data */
+	enum {                     /* type of allocation */
+		BLOCK_TYPE_MMAP_ORIG, /* mmap(2)-ed from an external file */
+		BLOCK_TYPE_MMAP,      /* mmap(2)-ed from a temporary file only known to this process */
+		BLOCK_TYPE_MALLOC,    /* heap allocated block using malloc(3) */
+	} type;
+} Block;
+
 /* The main struct holding all information of a given file */
 struct Text {
-	Array blocks;           /* blocks which hold text content */
+	/* blocks which hold text content */
+	// TODO: not sure that this needs to be an array of pointers
+	// but changing it breaks things so it will need to be revisited
+	Block      **data;
+	VisDACount   count;
+	VisDACount   capacity;
+
 	Piece *pieces;          /* all pieces which have been allocated, used to free them */
 	Piece *cache;           /* most recently modified piece */
 	Piece begin, end;       /* sentinel nodes which always exists but don't hold any data */
@@ -96,8 +98,18 @@ struct Text {
 	LineCache lines;        /* mapping between absolute pos in bytes and logical line breaks */
 };
 
-/* block management */
-static const char *block_store(Text*, const char *data, size_t len);
+#include "text-common.c"
+#include "text-util.c"
+#include "text-io.c"
+#include "text-iterator.c"
+#include "text-motions.c"
+#include "text-objects.c"
+#if CONFIG_TRE
+  #include "text-regex-tre.c"
+#else
+  #include "text-regex.c"
+#endif
+
 /* cache layer */
 static void cache_piece(Text *txt, Piece *p);
 static bool cache_contains(Text *txt, Piece *p);
@@ -113,8 +125,8 @@ static Location piece_get_extern(const Text *txt, size_t pos);
 static void span_init(Span *span, Piece *start, Piece *end);
 static void span_swap(Text *txt, Span *old, Span *new);
 /* change management */
-static Change *change_alloc(Text *txt, size_t pos);
-static void change_free(Change *c);
+static TextChange *text_change_alloc(Text *txt, size_t pos);
+static void text_change_free(TextChange *c);
 /* revision management */
 static Revision *revision_alloc(Text *txt);
 static void revision_free(Revision *rev);
@@ -125,33 +137,31 @@ static size_t lines_count(Text *txt, size_t pos, size_t len);
 
 /* stores the given data in a block, allocates a new one if necessary. Returns
  * a pointer to the storage location or NULL if allocation failed. */
-static const char *block_store(Text *txt, const char *data, size_t len) {
-	Block *blk = array_get_ptr(&txt->blocks, txt->blocks.len - 1);
-	if (!blk || !block_capacity(blk, len)) {
-		blk = block_alloc(len);
-		if (!blk)
-			return NULL;
-		if (!array_add_ptr(&txt->blocks, blk)) {
-			block_free(blk);
-			return NULL;
-		}
+static const char *block_store(Vis *vis, Text *txt, const char *data, size_t len)
+{
+	Block *b = txt->count > 0 ? txt->data[txt->count - 1] : 0;
+	if (!b || !block_capacity(b, len)) {
+		b = block_alloc(len);
+		if (!b)
+			return 0;
+		*da_push(vis, txt) = b;
 	}
-	return block_append(blk, data, len);
+	return block_append(b, data, len);
 }
 
 /* cache the given piece if it is the most recently changed one */
-static void cache_piece(Text *txt, Piece *p) {
-	Block *blk = array_get_ptr(&txt->blocks, txt->blocks.len - 1);
-	if (!blk || p->data < blk->data || p->data + p->len != blk->data + blk->len)
-		return;
-	txt->cache = p;
+static void cache_piece(Text *txt, Piece *p)
+{
+	Block *b = txt->count > 0 ? txt->data[txt->count - 1] : 0;
+	if (b && p->data >= b->data && p->data + p->len == b->data + b->len)
+		txt->cache = p;
 }
 
 /* check whether the given piece was the most recently modified one */
-static bool cache_contains(Text *txt, Piece *p) {
-	Block *blk = array_get_ptr(&txt->blocks, txt->blocks.len - 1);
+static bool cache_contains(Text *txt, Piece *p)
+{
 	Revision *rev = txt->current_revision;
-	if (!blk || !txt->cache || txt->cache != p || !rev || !rev->change)
+	if (txt->count == 0 || !txt->cache || txt->cache != p || !rev || !rev->change)
 		return false;
 
 	Piece *start = rev->change->new.start;
@@ -164,16 +174,18 @@ static bool cache_contains(Text *txt, Piece *p) {
 			break;
 	}
 
+	Block *blk = txt->data[txt->count - 1];
 	return found && p->data + p->len == blk->data + blk->len;
 }
 
 /* try to insert a chunk of data at a given piece offset. The insertion is only
  * performed if the piece is the most recently changed one. The length of the
  * piece, the span containing it and the whole text is adjusted accordingly */
-static bool cache_insert(Text *txt, Piece *p, size_t off, const char *data, size_t len) {
+static bool cache_insert(Text *txt, Piece *p, size_t off, const char *data, size_t len)
+{
 	if (!cache_contains(txt, p))
 		return false;
-	Block *blk = array_get_ptr(&txt->blocks, txt->blocks.len - 1);
+	Block *blk = txt->data[txt->count - 1];
 	size_t bufpos = p->data + off - blk->data;
 	if (!block_insert(blk, bufpos, data, len))
 		return false;
@@ -187,10 +199,11 @@ static bool cache_insert(Text *txt, Piece *p, size_t off, const char *data, size
  * performed if the piece is the most recently changed one and the whole
  * affected range lies within it. The length of the piece, the span containing it
  * and the whole text is adjusted accordingly */
-static bool cache_delete(Text *txt, Piece *p, size_t off, size_t len) {
+static bool cache_delete(Text *txt, Piece *p, size_t off, size_t len)
+{
 	if (!cache_contains(txt, p))
 		return false;
-	Block *blk = array_get_ptr(&txt->blocks, txt->blocks.len - 1);
+	Block *blk = txt->data[txt->count - 1];
 	size_t end;
 	size_t bufpos = p->data + off - blk->data;
 	if (!addu(off, len, &end) || end > p->len || !block_delete(blk, bufpos, len))
@@ -276,9 +289,9 @@ static Revision *revision_alloc(Text *txt) {
 static void revision_free(Revision *rev) {
 	if (!rev)
 		return;
-	for (Change *next, *c = rev->change; c; c = next) {
+	for (TextChange *next, *c = rev->change; c; c = next) {
 		next = c->next;
-		change_free(c);
+		text_change_free(c);
 	}
 	free(rev);
 }
@@ -358,14 +371,14 @@ static Location piece_get_extern(const Text *txt, size_t pos) {
 
 /* allocate a new change, associate it with current revision or a newly
  * allocated one if none exists. */
-static Change *change_alloc(Text *txt, size_t pos) {
+static TextChange *text_change_alloc(Text *txt, size_t pos) {
 	Revision *rev = txt->current_revision;
 	if (!rev) {
 		rev = revision_alloc(txt);
 		if (!rev)
 			return NULL;
 	}
-	Change *c = calloc(1, sizeof *c);
+	TextChange *c = calloc(1, sizeof *c);
 	if (!c)
 		return NULL;
 	c->pos = pos;
@@ -376,7 +389,7 @@ static Change *change_alloc(Text *txt, size_t pos) {
 	return c;
 }
 
-static void change_free(Change *c) {
+static void text_change_free(TextChange *c) {
 	if (!c)
 		return;
 	/* only free the new part of the span, the old one is still in use */
@@ -413,7 +426,8 @@ static void change_free(Change *c) {
  *      | |     |short|     | existing text |     | |
  *      \-+ <-- +-----+ <-- +---------------+ <-- +-/
  */
-bool text_insert(Text *txt, size_t pos, const char *data, size_t len) {
+bool text_insert(Vis *vis, Text *txt, size_t pos, const char *data, size_t len)
+{
 	if (len == 0)
 		return true;
 	if (pos > txt->size)
@@ -429,11 +443,11 @@ bool text_insert(Text *txt, size_t pos, const char *data, size_t len) {
 	if (cache_insert(txt, p, off, data, len))
 		return true;
 
-	Change *c = change_alloc(txt, pos);
+	TextChange *c = text_change_alloc(txt, pos);
 	if (!c)
 		return false;
 
-	if (!(data = block_store(txt, data, len)))
+	if (!(data = block_store(vis, txt, data, len)))
 		return false;
 
 	Piece *new = NULL;
@@ -472,7 +486,7 @@ bool text_insert(Text *txt, size_t pos, const char *data, size_t len) {
 
 static size_t revision_undo(Text *txt, Revision *rev) {
 	size_t pos = EPOS;
-	for (Change *c = rev->change; c; c = c->next) {
+	for (TextChange *c = rev->change; c; c = c->next) {
 		span_swap(txt, &c->new, &c->old);
 		pos = c->pos;
 	}
@@ -481,7 +495,7 @@ static size_t revision_undo(Text *txt, Revision *rev) {
 
 static size_t revision_redo(Text *txt, Revision *rev) {
 	size_t pos = EPOS;
-	Change *c = rev->change;
+	TextChange *c = rev->change;
 	while (c->next)
 		c = c->next;
 	for ( ; c; c = c->prev) {
@@ -585,25 +599,22 @@ time_t text_state(const Text *txt) {
 	return txt->history->time;
 }
 
-Text *text_loadat_method(int dirfd, const char *filename, enum TextLoadMethod method) {
+Text *text_loadat_method(Vis *vis, int dirfd, const char *filename, enum TextLoadMethod method)
+{
 	Text *txt = calloc(1, sizeof *txt);
 	if (!txt)
 		return NULL;
 	Piece *p = piece_alloc(txt);
 	if (!p)
 		goto out;
-	Block *block = NULL;
-	array_init(&txt->blocks);
+	Block *block = 0;
 	lineno_cache_invalidate(&txt->lines);
 	if (filename) {
 		errno = 0;
 		block = block_load(dirfd, filename, method, &txt->info);
 		if (!block && errno)
 			goto out;
-		if (block && !array_add_ptr(&txt->blocks, block)) {
-			block_free(block);
-			goto out;
-		}
+		*da_push(vis, txt) = block;
 	}
 
 	if (!block)
@@ -615,7 +626,7 @@ Text *text_loadat_method(int dirfd, const char *filename, enum TextLoadMethod me
 	piece_init(&txt->end, p, NULL, NULL, 0);
 	txt->size = p->len;
 	/* write an empty revision */
-	change_alloc(txt, EPOS);
+	text_change_alloc(txt, EPOS);
 	text_snapshot(txt);
 	txt->saved_revision = txt->history;
 
@@ -627,20 +638,6 @@ out:
 
 struct stat text_stat(const Text *txt) {
 	return txt->info;
-}
-
-void text_saved(Text *txt, struct stat *meta) {
-	if (meta)
-		txt->info = *meta;
-	txt->saved_revision = txt->history;
-	text_snapshot(txt);
-}
-
-Block *text_block_mmaped(Text *txt) {
-	Block *block = array_get_ptr(&txt->blocks, 0);
-	if (block && block->type == BLOCK_TYPE_MMAP_ORIG && block->size)
-		return block;
-	return NULL;
 }
 
 /* A delete operation can either start/stop midway through a piece or at
@@ -673,7 +670,7 @@ bool text_delete(Text *txt, size_t pos, size_t len) {
 	size_t off = loc.off;
 	if (cache_delete(txt, p, off, len))
 		return true;
-	Change *c = change_alloc(txt, pos);
+	TextChange *c = text_change_alloc(txt, pos);
 	if (!c)
 		return false;
 
@@ -746,17 +743,6 @@ bool text_delete_range(Text *txt, const Filerange *r) {
 	return text_delete(txt, r->start, text_range_size(r));
 }
 
-/* preserve the current text content such that it can be restored by
- * means of undo/redo operations */
-bool text_snapshot(Text *txt) {
-	if (txt->current_revision)
-		txt->last_revision = txt->current_revision;
-	txt->current_revision = NULL;
-	txt->cache = NULL;
-	return true;
-}
-
-
 void text_free(Text *txt) {
 	if (!txt)
 		return;
@@ -776,9 +762,9 @@ void text_free(Text *txt) {
 		piece_free(p);
 	}
 
-	for (size_t i = 0, len = txt->blocks.len; i < len; i++)
-		block_free(array_get_ptr(&txt->blocks, i));
-	array_release(&txt->blocks);
+	for (VisDACount i = 0; i < txt->count; i++)
+		block_free(txt->data[i]);
+	da_release(txt);
 
 	free(txt);
 }
@@ -789,8 +775,8 @@ bool text_modified(const Text *txt) {
 
 bool text_mmaped(const Text *txt, const char *ptr) {
 	uintptr_t addr = (uintptr_t)ptr;
-	for (size_t i = 0, len = txt->blocks.len; i < len; i++) {
-		Block *blk = array_get_ptr(&txt->blocks, i);
+	for (VisDACount i = 0; i < txt->count; i++) {
+		Block *blk = txt->data[i];
 		if ((blk->type == BLOCK_TYPE_MMAP_ORIG || blk->type == BLOCK_TYPE_MMAP) &&
 		    (uintptr_t)(blk->data) <= addr && addr < (uintptr_t)(blk->data + blk->size))
 			return true;

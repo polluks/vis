@@ -9,10 +9,6 @@
  *  http://github.com/agl/critbit
  *  http://ccodearchive.net/info/strmap.html
  */
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
-#include <inttypes.h>
 #include "map.h"
 
 typedef struct Node Node;
@@ -63,19 +59,10 @@ void *map_get(const Map *map, const char *key)
 
 void *map_closest(const Map *map, const char *prefix)
 {
-	errno = 0;
-	void *v = map_get(map, prefix);
-	if (v)
-		return v;
-	const Map *m = map_prefix(map, prefix);
-	if (map_empty(m))
-		errno = ENOENT;
-	return m->v;
-}
-
-bool map_contains(const Map *map, const char *prefix)
-{
-	return !map_empty(map_prefix(map, prefix));
+	void *result = map_get(map, prefix);
+	if (!result)
+		result = map_prefix(map, prefix)->v;
+	return result;
 }
 
 bool map_put(Map *map, const char *k, const void *value)
@@ -88,15 +75,11 @@ bool map_put(Map *map, const char *k, const void *value)
 	uint8_t bit_num, new_dir;
 	char *key;
 
-	if (!value) {
-		errno = EINVAL;
+	if (!value)
 		return false;
-	}
 
-	if (!(key = strdup(k))) {
-		errno = ENOMEM;
+	if (!(key = strdup(k)))
 		return false;
-	}
 
 	/* Empty map? */
 	if (!map->u.n) {
@@ -113,7 +96,6 @@ bool map_put(Map *map, const char *k, const void *value)
 		if (key[byte_num] == '\0') {
 			/* All identical! */
 			free(key);
-			errno = EEXIST;
 			return false;
 		}
 	}
@@ -130,7 +112,6 @@ bool map_put(Map *map, const char *k, const void *value)
 	newn = malloc(sizeof(*newn));
 	if (!newn) {
 		free(key);
-		errno = ENOMEM;
 		return false;
 	}
 	newn->byte_num = byte_num;
@@ -171,10 +152,8 @@ void *map_delete(Map *map, const char *key)
 	uint8_t direction;
 
 	/* Empty map? */
-	if (!map->u.n) {
-		errno = ENOENT;
+	if (!map->u.n)
 		return NULL;
-	}
 
 	/* Find closest, but keep track of parent. */
 	n = map;
@@ -193,10 +172,8 @@ void *map_delete(Map *map, const char *key)
 	}
 
 	/* Did we find it? */
-	if (strcmp(key, n->u.s)) {
-		errno = ENOENT;
+	if (strcmp(key, n->u.s))
 		return NULL;
-	}
 
 	free((char*)n->u.s);
 	value = n->v;
@@ -288,11 +265,11 @@ const Map *map_prefix(const Map *map, const char *prefix)
 	return top;
 }
 
-static void clear(Map n)
+static void map_clear_impl(Map n)
 {
 	if (!n.v) {
-		clear(n.u.n->child[0]);
-		clear(n.u.n->child[1]);
+		map_clear_impl(n.u.n->child[0]);
+		map_clear_impl(n.u.n->child[1]);
 		free(n.u.n);
 	} else {
 		free((char*)n.u.s);
@@ -302,7 +279,7 @@ static void clear(Map n)
 void map_clear(Map *map)
 {
 	if (map->u.n)
-		clear(*map);
+		map_clear_impl(*map);
 	map->u.n = NULL;
 	map->v = NULL;
 }
@@ -345,18 +322,4 @@ void map_free(Map *map)
 		return;
 	map_clear(map);
 	free(map);
-}
-
-static bool free_elem(const char *key, void *value, void *data)
-{
-	free(value);
-	return true;
-}
-
-void map_free_full(Map *map)
-{
-	if (!map)
-		return;
-	map_iterate(map, free_elem, NULL);
-	map_free(map);
 }

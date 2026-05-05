@@ -1,16 +1,13 @@
 #ifndef VIS_CORE_H
 #define VIS_CORE_H
 
-#include <setjmp.h>
+#include "util.h"
+
 #include "vis.h"
 #include "sam.h"
 #include "vis-lua.h"
 #include "text.h"
-#include "text-util.h"
 #include "map.h"
-#include "array.h"
-#include "buffer.h"
-#include "util.h"
 
 /* a mode contains a set of key bindings which are currently valid.
  *
@@ -38,16 +35,25 @@ struct Mode {
 	bool visual;                        /* whether text selection is possible in this mode */
 };
 
+enum PromptState {
+	PROMPTSTATE_NONE,      /* there is no prompt window */
+	PROMPTSTATE_ONELINE,   /* normal state of the prompt: one line at the bottom of the terminal */
+	PROMPTSTATE_MULTILINE, /* when prompt_up was called and prompt window becomes leftmost or topmost window depending on the layout */
+	PROMPTSTATE_COMMAND,   /* used to move cursor to the bottom of the terminal before running prompt command */
+};
+
 typedef struct {
-	Array values;
-	bool linewise; /* place register content on a new line when inserting? */
-	bool append;
+	Buffer     *data;
+	VisDACount  count;
+	VisDACount  capacity;
 	enum {
 		REGISTER_NORMAL,
 		REGISTER_NUMBER,
 		REGISTER_BLACKHOLE,
 		REGISTER_CLIPBOARD,
 	} type;
+	bool linewise; /* place register content on a new line when inserting? */
+	bool append;
 } Register;
 
 struct OperatorContext {
@@ -124,18 +130,12 @@ typedef struct {             /** collects all information until an operator is e
 	Arg arg;
 } Action;
 
-typedef struct Change Change;
+typedef struct SamChange SamChange;
 typedef struct {
-	Change *changes;      /* all changes in monotonically increasing file position */
-	Change *latest;       /* most recent change */
+	SamChange *changes;   /* all changes in monotonically increasing file position */
+	SamChange *latest;    /* most recent change */
 	enum SamError error;  /* non-zero in case something went wrong */
 } Transcript;
-
-typedef struct {
-	Array prev;
-	Array next;
-	size_t max;
-} MarkList;
 
 struct File { /* shared state among windows displaying the same file */
 	Text *text;                      /* data structure holding the file content */
@@ -145,7 +145,7 @@ struct File { /* shared state among windows displaying the same file */
 	bool internal;                   /* whether it is an internal file (e.g. used for the prompt) */
 	struct stat stat;                /* filesystem information when loaded/saved, used to detect changes outside the editor */
 	int refcount;                    /* how many windows are displaying this file? (always >= 1) */
-	Array marks[VIS_MARK_INVALID];   /* marks which are shared across windows */
+	SelectionRegionList marks[VIS_MARK_INVALID]; /* marks which are shared across windows */
 	enum TextSaveMethod save_method; /* whether the file is saved using rename(2) or overwritten */
 	Transcript transcript;           /* keeps track of changes performed by sam commands */
 	File *next, *prev;
@@ -161,12 +161,24 @@ struct Win {
 	bool expandtab;         /* whether typed tabs should be converted to spaces in this window*/
 	Vis *vis;               /* editor instance to which this window belongs */
 	File *file;             /* file being displayed in this window */
-	MarkList jumplist;      /* LRU jump management */
-	Array saved_selections; /* register used to store selections */
+	SelectionRegionList saved_selections; /* register used to store selections */
 	Mode modes[VIS_MODE_INVALID]; /* overlay mods used for per window key bindings */
 	Win *parent;            /* window which was active when showing the command prompt */
 	Mode *parent_mode;      /* mode which was active when showing the command prompt */
 	Win *prev, *next;       /* neighbouring windows */
+
+	/* NOTE: Selection Jump Cache
+	 * Anytime the selection jumps the previous set of selections gets
+	 * pushed into this cache. The user can navigate this cache to
+	 * restore old selections and they can save their own selection
+	 * sets into the cache.
+	 *
+	 * IMPORTANT: cursor is not kept in bounds. it is always used modulo VIS_MARK_SET_LRU_COUNT
+	 */
+	#define VIS_MARK_SET_LRU_COUNT (32)
+	size_t              mark_set_lru_cursor;
+	SelectionRegionList mark_set_lru_regions[VIS_MARK_SET_LRU_COUNT];
+	enum VisMode        mark_set_lru_modes[VIS_MARK_SET_LRU_COUNT];
 };
 
 struct Vis {
@@ -186,14 +198,17 @@ struct Vis {
 	char search_char[8];                 /* last used character to search for via 'f', 'F', 't', 'T' */
 	int last_totill;                     /* last to/till movement used for ';' and ',' */
 	int search_direction;                /* used for `n` and `N` */
+	enum TextLoadMethod load_method;     /* how existing files should be loaded */
+	enum PromptState prompt_state;       /* needed for determining primary cursor's position */
 	bool autoindent;                     /* whether indentation should be copied from previous line on newline */
 	bool change_colors;                  /* whether to adjust 256 color palette for true colors */
+	bool ignorecase;                     /* whether to ignore case when searching */
+	bool keymap_disabled;                /* ignore key map for next key press, gets automatically re-enabled */
 	char *shell;                         /* shell used to launch external commands */
 	Map *cmds;                           /* ":"-commands, used for unique prefix queries */
 	Map *usercmds;                       /* user registered ":"-commands */
 	Map *options;                        /* ":set"-options */
 	Map *keymap;                         /* key translation before any bindings are matched */
-	bool keymap_disabled;                /* ignore key map for next key press, gets automatically re-enabled */
 	char key[VIS_KEY_LENGTH_MAX];        /* last pressed key as reported from the UI */
 	char key_current[VIS_KEY_LENGTH_MAX];/* current key being processed by the input queue */
 	char key_prev[VIS_KEY_LENGTH_MAX];   /* previous key which was processed by the input queue */
@@ -211,16 +226,44 @@ struct Vis {
 	volatile sig_atomic_t need_resize;   /* need to resize UI (SIGWINCH occurred) */
 	volatile sig_atomic_t resume;        /* need to resume UI (SIGCONT occurred) */
 	volatile sig_atomic_t terminate;     /* need to terminate we were being killed by SIGTERM */
-	sigjmp_buf sigbus_jmpbuf;            /* used to jump back to a known good state in the mainloop after (SIGBUS) */
 	Map *actions;                        /* registered editor actions / special keys commands */
-	Array actions_user;                  /* dynamically allocated editor actions */
+
+	struct {
+		Operator   *data;
+		VisDACount  count;
+		VisDACount  capacity;
+	} operators;
+
+	struct {
+		Movement   *data;
+		VisDACount  count;
+		VisDACount  capacity;
+	} motions;
+
+	struct {
+		TextObject *data;
+		VisDACount  count;
+		VisDACount  capacity;
+	} textobjects;
+
+	/* TODO: these should not be storing arrays of pointers. they should be using ids which index
+	 * into the arrays like the above */
+	struct {
+		KeyAction  **data;
+		VisDACount   count;
+		VisDACount   capacity;
+	} actions_user;
+
+	struct {
+		KeyBinding **data;
+		VisDACount   count;
+		VisDACount   capacity;
+	} bindings;
+
+	sigjmp_buf sigbus_jmpbuf;            /* used to jump back to a known good state in the mainloop after (SIGBUS) */
+	jmp_buf    oom_jmp_buf;              /* if memory allocation ever fails we jump here to try and fail cleanly */
+
 	lua_State *lua;                      /* lua context used for syntax highlighting */
-	enum TextLoadMethod load_method;     /* how existing files should be loaded */
-	Array operators;
-	Array motions;
-	Array textobjects;
-	Array bindings;
-	bool ignorecase;                     /* whether to ignore case when searching */
 };
 
 enum VisEvents {
@@ -239,7 +282,7 @@ enum VisEvents {
 	VIS_EVENT_UI_DRAW,
 };
 
-bool vis_event_emit(Vis*, enum VisEvents, ...);
+VIS_INTERNAL bool vis_event_emit(Vis*, enum VisEvents, ...);
 
 typedef struct {
 	char name;
@@ -257,46 +300,35 @@ extern const TextObject vis_textobjects[VIS_TEXTOBJECT_INVALID];
 extern const MarkDef vis_marks[VIS_MARK_a];
 extern const RegisterDef vis_registers[VIS_REG_a];
 
-void macro_operator_stop(Vis *vis);
-void macro_operator_record(Vis *vis);
+VIS_INTERNAL void macro_operator_stop(Vis *vis);
+VIS_INTERNAL void macro_operator_record(Vis *vis);
 
-void vis_do(Vis *vis);
-void action_reset(Action*);
-size_t vis_text_insert_nl(Vis*, Text*, size_t pos);
+VIS_INTERNAL void vis_do(Vis *vis);
+VIS_INTERNAL void action_reset(Action*);
+VIS_INTERNAL size_t vis_text_insert_nl(Vis*, Text*, size_t pos);
 
-Mode *mode_get(Vis*, enum VisMode);
-void mode_set(Vis *vis, Mode *new_mode);
-Macro *macro_get(Vis *vis, enum VisRegister);
+VIS_INTERNAL Mode *mode_get(Vis*, enum VisMode);
+VIS_INTERNAL void mode_set(Vis *vis, Mode *new_mode);
+VIS_INTERNAL Macro *macro_get(Vis *vis, enum VisRegister);
 
-Win *window_new_file(Vis*, File*, enum UiOption);
-void window_selection_save(Win *win);
-void window_status_update(Vis *vis, Win *win);
+VIS_INTERNAL Win *window_new_file(Vis*, File*, enum UiOption);
+VIS_INTERNAL void window_selection_save(Win *win);
+VIS_INTERNAL void window_status_update(Vis *vis, Win *win);
 
-char *absolute_path(const char *path);
+VIS_INTERNAL const char *file_name_get(File*);
+VIS_INTERNAL void file_name_set(File*, const char *name);
 
-const char *file_name_get(File*);
-void file_name_set(File*, const char *name);
+VIS_INTERNAL const char *register_get(Vis*, Register*, size_t *len);
+VIS_INTERNAL const char *register_slot_get(Vis*, Register*, size_t slot, size_t *len);
 
-bool register_init(Register*);
-void register_release(Register*);
+VIS_INTERNAL bool register_put0(Vis*, Register*, const char *data);
+VIS_INTERNAL bool register_put(Vis*, Register*, const char *data, size_t len);
+VIS_INTERNAL bool register_slot_put(Vis*, Register*, size_t slot, const char *data, size_t len);
 
-void mark_init(Array*);
-void mark_release(Array*);
+VIS_INTERNAL bool register_put_range(Vis*, Register*, Text*, Filerange*);
+VIS_INTERNAL bool register_slot_put_range(Vis*, Register*, size_t slot, Text*, Filerange*);
 
-void marklist_init(MarkList*, size_t max);
-void marklist_release(MarkList*);
-
-const char *register_get(Vis*, Register*, size_t *len);
-const char *register_slot_get(Vis*, Register*, size_t slot, size_t *len);
-
-bool register_put0(Vis*, Register*, const char *data);
-bool register_put(Vis*, Register*, const char *data, size_t len);
-bool register_slot_put(Vis*, Register*, size_t slot, const char *data, size_t len);
-
-bool register_put_range(Vis*, Register*, Text*, Filerange*);
-bool register_slot_put_range(Vis*, Register*, size_t slot, Text*, Filerange*);
-
-size_t vis_register_count(Vis*, Register*);
-bool register_resize(Register*, size_t count);
+VIS_INTERNAL size_t vis_register_count(Vis*, Register*);
+VIS_INTERNAL bool register_resize(Register*, size_t count);
 
 #endif

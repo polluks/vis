@@ -1091,9 +1091,9 @@ function M.embed(lexer, child, start_rule, end_rule)
 	if child._WORDLISTS then
 		for name, i in pairs(child._WORDLISTS) do
 			if type(name) == 'string' and type(i) == 'number' then
-				name = child._name .. '.' .. name
-				lexer:word_match(name) -- for side effects
-				lexer:set_word_list(name, child._WORDLISTS[i])
+				local full_name = child._name .. '.' .. name
+				lexer:word_match(full_name) -- for side effects
+				lexer:set_word_list(full_name, child._WORDLISTS[i])
 			end
 		end
 	end
@@ -1742,6 +1742,7 @@ function M.detect(filename, line)
 		ni = 'inform', --
 		cfg = 'ini', cnf = 'ini', inf = 'ini', ini = 'ini', reg = 'ini', --
 		io = 'io_lang', --
+		janet = 'janet', --
 		bsh = 'java', java = 'java', --
 		js = 'javascript', jsfl = 'javascript', --
 		jq = 'jq', --
@@ -1771,7 +1772,7 @@ function M.detect(filename, line)
 		m = 'objective_c', mm = 'objective_c', objc = 'objective_c', --
 		caml = 'caml', ml = 'caml', mli = 'caml', mll = 'caml', mly = 'caml', --
 		org = 'org', --
-		dpk = 'pascal', dpr = 'pascal', p = 'pascal', pas = 'pascal', --
+		dpk = 'pascal', dpr = 'pascal', p = 'pascal', pas = 'pascal', pp = 'pascal', --
 		al = 'perl', perl = 'perl', pl = 'perl', pm = 'perl', pod = 'perl', --
 		inc = 'php', php = 'php', php3 = 'php', php4 = 'php', phtml = 'php', --
 		p8 = 'pico8', --
@@ -1811,6 +1812,8 @@ function M.detect(filename, line)
 		taskpaper = 'taskpaper', --
 		tcl = 'tcl', tk = 'tcl', --
 		texi = 'texinfo', --
+		['todo.txt'] = 'todotxt', ['Todo.txt'] = 'todotxt', ['done.txt'] = 'todotxt',
+		['Done.txt'] = 'todotxt', --
 		toml = 'toml', --
 		['1'] = 'troff', ['2'] = 'troff', ['3'] = 'troff', ['4'] = 'troff', ['5'] = 'troff',
 		['6'] = 'troff', ['7'] = 'troff', ['8'] = 'troff', ['9'] = 'troff', ['1x'] = 'troff',

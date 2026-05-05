@@ -1,17 +1,4 @@
-#include <ctype.h>
-#include <errno.h>
-#include <limits.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <wchar.h>
-
 #include "vis-core.h"
-#include "view.h"
-#include "text.h"
-#include "text-motions.h"
-#include "text-util.h"
-#include "util.h"
 
 /* A selection is made up of two marks named cursor and anchor.
  * While the anchor remains fixed the cursor mark follows cursor motions.
@@ -45,21 +32,25 @@ static const char *symbols_default[] = {
 	[SYNTAX_SYMBOL_EOF]      = "~",
 };
 
-static Cell cell_blank = { .width = 0, .len = 0, .data = " ", };
-
-/* move visible viewport n-lines up/down, redraws the view but does not change
- * cursor position which becomes invalid and should be corrected by calling
- * view_cursors_to. the return value indicates whether the visible area changed.
- */
-static bool view_viewport_up(View *view, int n);
-static bool view_viewport_down(View *view, int n);
-
-static void view_clear(View *view);
-static bool view_add_cell(View *view, const Cell *cell);
-static bool view_addch(View *view, Cell *cell);
-static void selection_free(Selection*);
-/* set/move current cursor position to a given (line, column) pair */
-static size_t cursor_set(Selection*, Line *line, int col);
+static void selection_free(Selection *s)
+{
+	for (Selection *after = s->next; after; after = after->next)
+		after->number--;
+	if (s->prev)
+		s->prev->next = s->next;
+	if (s->next)
+		s->next->prev = s->prev;
+	if (s->view->selections == s)
+		s->view->selections = s->next;
+	if (s->view->selection == s)
+		s->view->selection = s->next ? s->next : s->prev;
+	if (s->view->selection_dead == s)
+		s->view->selection_dead = NULL;
+	if (s->view->selection_latest == s)
+		s->view->selection_latest = s->prev ? s->prev : s->next;
+	s->view->selection_count--;
+	free(s);
+}
 
 void window_status_update(Vis *vis, Win *win) {
 	char left_parts[4][255] = { "", "", "", "" };
@@ -201,17 +192,21 @@ static void view_clear(View *view) {
 	view->col = 0;
 	view->wrapcol = 0;
 	view->prevch_breakat = false;
-
-	/* FIXME: awful garbage that only exists because every
-	 * struct in this program is an interdependent hellscape */
-	Win *win = (Win *)((char *)view - offsetof(Win, view));
-	ui_window_style_set(&win->vis->ui, win->id, &cell_blank, UI_STYLE_DEFAULT, false);
 }
 
 static int view_max_text_width(const View *view) {
 	if (view->wrapcolumn > 0)
 		return MIN(view->wrapcolumn, view->width);
 	return view->width;
+}
+
+static Cell
+view_blank_cell(View *view)
+{
+	// TODO(rnp): cleanup win and view should be merged
+	Win *win = (Win *)((char *)view - offsetof(Win, view));
+	Cell result = {.data = " ", .style = win->vis->ui.styles[win->id * UI_STYLE_MAX + UI_STYLE_DEFAULT]};
+	return result;
 }
 
 static void view_wrap_line(View *view) {
@@ -235,12 +230,13 @@ static void view_wrap_line(View *view) {
 	}
 
 	/* clear remaining cells on line */
+	Cell blank = view_blank_cell(view);
 	for (int i = wrapcol; i < view->width; ++i) {
 		if (i < col) {
 			wrapped_line->width -= wrapped_line->cells[i].width;
 			wrapped_line->len -= wrapped_line->cells[i].len;
 		}
-		wrapped_line->cells[i] = cell_blank;
+		wrapped_line->cells[i] = blank;
 	}
 }
 
@@ -266,6 +262,9 @@ static bool view_add_cell(View *view, const Cell *cell) {
 }
 
 static bool view_expand_tab(View *view, Cell *cell) {
+	Win *win = (Win *)((char *)view - offsetof(Win, view));
+	ui_window_style_set(&win->vis->ui, win->id, cell, UI_STYLE_WHITESPACE, false);
+
 	cell->width = 1;
 
 	int displayed_width = view->tabwidth - (view->col % view->tabwidth);
@@ -287,6 +286,9 @@ static bool view_expand_newline(View *view, Cell *cell) {
 	size_t lineno = view->line->lineno;
 	const char *symbol = view->symbols[SYNTAX_SYMBOL_EOL];
 
+	Win *win = (Win *)((char *)view - offsetof(Win, view));
+	ui_window_style_set(&win->vis->ui, win->id, cell, UI_STYLE_WHITESPACE, false);
+
 	strncpy(cell->data, symbol, sizeof(cell->data) - 1);
 	cell->width = 1;
 	if (!view_add_cell(view, cell))
@@ -297,6 +299,15 @@ static bool view_expand_newline(View *view, Cell *cell) {
 	if (view->line)
 		view->line->lineno = lineno + 1;
 	return true;
+}
+
+static bool view_expand_space(View *view, Cell *cell) {
+	Win *win = (Win *)((char *)view - offsetof(Win, view));
+	ui_window_style_set(&win->vis->ui, win->id, cell, UI_STYLE_WHITESPACE, false);
+
+	const char *symbol = view->symbols[SYNTAX_SYMBOL_SPACE];
+	strncpy(cell->data, symbol, sizeof(cell->data) - 1);
+	return view_add_cell(view, cell);
 }
 
 /* try to add another character to the view, return whether there was space left */
@@ -310,7 +321,7 @@ static bool view_addch(View *view, Cell *cell) {
 		view->wrapcol = view->col;
 	}
 	view->prevch_breakat = ch_breakat;
-	cell->style = cell_blank.style;
+	cell->style = view_blank_cell(view).style;
 
 	unsigned char ch = (unsigned char)cell->data[0];
 	switch (ch) {
@@ -318,11 +329,9 @@ static bool view_addch(View *view, Cell *cell) {
 		return view_expand_tab(view, cell);
 	case '\n':
 		return view_expand_newline(view, cell);
-	case ' ': {
-		const char *symbol = view->symbols[SYNTAX_SYMBOL_SPACE];
-		strncpy(cell->data, symbol, sizeof(cell->data) - 1);
-		return view_add_cell(view, cell);
-	}}
+	case ' ':
+		return view_expand_space(view, cell);
+	}
 
 	if (ch < 128 && !isprint(ch)) {
 		/* non-printable ascii char, represent it as ^(char + 64) */
@@ -483,10 +492,11 @@ void view_draw(View *view) {
 		view->lastline = view->bottomline;
 	}
 
+	Cell blank = view_blank_cell(view);
 	/* clear remaining of line, important to show cursor at end of file */
 	if (view->line) {
 		for (int x = view->col; x < view->width; x++)
-			view->line->cells[x] = cell_blank;
+			view->line->cells[x] = blank;
 	}
 
 	/* resync position of cursors within visible area */
@@ -506,9 +516,11 @@ void view_draw(View *view) {
 bool view_update(View *view) {
 	if (!view->need_update)
 		return false;
+
+	Cell blank = view_blank_cell(view);
 	for (Line *l = view->lastline->next; l; l = l->next) {
 		for (int x = 0; x < view->width; x++)
-			l->cells[x] = cell_blank;
+			l->cells[x] = blank;
 	}
 	view->need_update = false;
 	return true;
@@ -540,7 +552,6 @@ bool view_resize(View *view, int width, int height) {
 	view->textbuf = textbuf;
 	view->width = width;
 	view->height = height;
-	memset(view->lines, 0, view->lines_size);
 	view_draw(view);
 	return true;
 }
@@ -583,7 +594,9 @@ bool view_init(Win *win, Text *text) {
 	return true;
 }
 
-static size_t cursor_set(Selection *sel, Line *line, int col) {
+/* set/move current cursor position to a given (line, column) pair */
+static size_t cursor_set(Selection *sel, Line *line, int col)
+{
 	int row = 0;
 	View *view = sel->view;
 	size_t pos = view->start;
@@ -609,21 +622,26 @@ static size_t cursor_set(Selection *sel, Line *line, int col) {
 	return pos;
 }
 
-static bool view_viewport_down(View *view, int n) {
-	Line *line;
+/* NOTE: does not change the cursor_position use view_cursors_to() afterwords.
+ * returns whether the visible area changed */
+static bool view_viewport_down(View *view, int n)
+{
 	if (view->end >= text_size(view->text))
 		return false;
 	if (n >= view->height) {
 		view->start = view->end;
 	} else {
-		for (line = view->topline; line && n > 0; line = line->next, n--)
+		for (Line *line = view->topline; line && n > 0; line = line->next, n--)
 			view->start += line->len;
 	}
 	view_draw(view);
 	return true;
 }
 
-static bool view_viewport_up(View *view, int n) {
+/* NOTE: does not change the cursor_position use view_cursors_to() afterwords.
+ * returns whether the visible area changed */
+static bool view_viewport_up(View *view, int n)
+{
 	/* scrolling up is somewhat tricky because we do not yet know where
 	 * the lines start, therefore scan backwards but stop at a reasonable
 	 * maximum in case we are dealing with a file without any newlines
@@ -859,10 +877,6 @@ size_t view_cursor_get(View *view) {
 	return view_cursors_pos(view->selection);
 }
 
-void view_scroll_to(View *view, size_t pos) {
-	view_cursors_scroll_to(view->selection, pos);
-}
-
 void win_options_set(Win *win, enum UiOption options) {
 	const int mapping[] = {
 		[SYNTAX_SYMBOL_SPACE]    = UI_OPTION_SYMBOL_SPACE,
@@ -1030,35 +1044,15 @@ Selection *view_selections_column_next(Selection *sel, int column) {
 	return selections_column_next(sel->view, sel, column);
 }
 
-static void selection_free(Selection *s) {
-	if (!s)
-		return;
-	for (Selection *after = s->next; after; after = after->next)
-		after->number--;
-	if (s->prev)
-		s->prev->next = s->next;
-	if (s->next)
-		s->next->prev = s->prev;
-	if (s->view->selections == s)
-		s->view->selections = s->next;
-	if (s->view->selection == s)
-		s->view->selection = s->next ? s->next : s->prev;
-	if (s->view->selection_dead == s)
-		s->view->selection_dead = NULL;
-	if (s->view->selection_latest == s)
-		s->view->selection_latest = s->prev ? s->prev : s->next;
-	s->view->selection_count--;
-	free(s);
-}
-
-bool view_selections_dispose(Selection *sel) {
-	if (!sel)
-		return true;
-	View *view = sel->view;
-	if (!view->selections || !view->selections->next)
-		return false;
-	selection_free(sel);
-	view_selections_primary_set(view->selection);
+bool view_selections_dispose(Selection *sel)
+{
+	if (sel) {
+		View *view = sel->view;
+		if (!view->selections || !view->selections->next)
+			return false;
+		selection_free(sel);
+		view_selections_primary_set(view->selection);
+	}
 	return true;
 }
 
@@ -1274,12 +1268,11 @@ bool view_regions_save(View *view, Filerange *r, SelectionRegion *s) {
 	return true;
 }
 
-void view_selections_set_all(View *view, Array *arr, bool anchored) {
-	Selection *s;
-	Filerange *r;
-	size_t i = 0;
-	for (s = view->selections; s; s = s->next) {
-		if (!(r = array_get(arr, i++)) || !view_selections_set(s, r)) {
+void view_selections_set_all(View *view, FilerangeList ranges, bool anchored)
+{
+	VisDACount i = 0;
+	for (Selection *s = view->selections; s; s = s->next) {
+		if (i++ >= ranges.count || !view_selections_set(s, ranges.data + i - 1)) {
 			for (Selection *next; s; s = next) {
 				next = view_selections_next(s);
 				if (i == 1 && s == view->selection)
@@ -1291,8 +1284,9 @@ void view_selections_set_all(View *view, Array *arr, bool anchored) {
 		}
 		s->anchored = anchored;
 	}
-	while ((r = array_get(arr, i++))) {
-		s = view_selections_new_force(view, r->start);
+	while (i < ranges.count) {
+		Filerange *r = ranges.data + i++;
+		Selection *s = view_selections_new_force(view, r->start);
 		if (!s || !view_selections_set(s, r))
 			break;
 		s->anchored = anchored;
@@ -1300,17 +1294,16 @@ void view_selections_set_all(View *view, Array *arr, bool anchored) {
 	view_selections_primary_set(view->selections);
 }
 
-Array view_selections_get_all(View *view) {
-	Array arr;
-	array_init_sized(&arr, sizeof(Filerange));
-	if (!array_reserve(&arr, view->selection_count))
-		return arr;
+FilerangeList view_selections_get_all(Vis *vis, View *view)
+{
+	FilerangeList result = {0};
+	da_reserve(vis, &result, view->selection_count);
 	for (Selection *s = view->selections; s; s = s->next) {
 		Filerange r = view_selections_get(s);
 		if (text_range_valid(&r))
-			array_add(&arr, &r);
+			*da_push(vis, &result) = r;
 	}
-	return arr;
+	return result;
 }
 
 void view_selections_normalize(View *view) {

@@ -1,8 +1,4 @@
-#include <string.h>
 #include "vis-core.h"
-#include "text-motions.h"
-#include "text-objects.h"
-#include "text-util.h"
 
 bool vis_prompt_cmd(Vis *vis, const char *cmd) {
 	if (!cmd || !cmd[0] || !cmd[1])
@@ -27,13 +23,15 @@ static void prompt_hide(Win *win) {
 	/* make sure that file is new line terminated */
 	char lastchar = '\0';
 	if (size >= 1 && text_byte_get(txt, size-1, &lastchar) && lastchar != '\n')
-		text_insert(txt, size, "\n", 1);
+		text_insert(win->vis, txt, size, "\n", 1);
 	/* remove empty entries */
 	Filerange line_range = text_object_line(txt, text_size(txt)-1);
 	char *line = text_bytes_alloc0(txt, line_range.start, text_range_size(&line_range));
 	if (line && (line[0] == '\n' || (strchr(":/?", line[0]) && (line[1] == '\n' || line[1] == '\0'))))
 		text_delete_range(txt, &line_range);
 	free(line);
+	win->vis->prompt_state = PROMPTSTATE_NONE;
+	win->vis->ui.selwin = win->parent;
 	vis_window_close(win);
 }
 
@@ -97,18 +95,21 @@ static const char *prompt_enter(Vis *vis, const char *keys, const Arg *arg) {
 	bool lastline = (range.end == text_size(txt));
 
 	prompt_restore(prompt);
+	win->vis->prompt_state = PROMPTSTATE_COMMAND;
+	vis_redraw(vis);
 	if (vis_prompt_cmd(vis, cmd)) {
 		prompt_hide(prompt);
+		/* hide cursor in case it was made visible */
+		fprintf(stderr, "\x1b[?25l");
 		if (!lastline) {
 			text_delete(txt, range.start, text_range_size(&range));
-			text_appendf(txt, "%s\n", cmd);
+			text_appendf(vis, txt, "%s\n", cmd);
 		}
 	} else {
 		vis->win = prompt;
 		vis->mode = &vis_modes[VIS_MODE_INSERT];
 	}
 	free(cmd);
-	vis_draw(vis);
 	return keys;
 }
 
@@ -127,6 +128,7 @@ static const char *prompt_up(Vis *vis, const char *keys, const Arg *arg) {
 	vis_motion(vis, VIS_MOVE_LINE_UP);
 	vis_window_mode_unmap(vis->win, VIS_MODE_INSERT, "<Up>");
 	win_options_set(vis->win, UI_OPTION_SYMBOL_EOF);
+	vis->prompt_state = PROMPTSTATE_MULTILINE;
 	return keys;
 }
 
@@ -163,7 +165,7 @@ void vis_prompt_show(Vis *vis, const char *title) {
 	if (!prompt)
 		return;
 	Text *txt = prompt->file->text;
-	text_appendf(txt, "%s\n", title);
+	text_appendf(vis, txt, "%s\n", title);
 	Selection *sel = view_selections_primary_get(&prompt->view);
 	view_cursors_scroll_to(sel, text_size(txt)-1);
 	prompt->parent = active;
@@ -177,6 +179,8 @@ void vis_prompt_show(Vis *vis, const char *title) {
 	if (CONFIG_LUA)
 		vis_window_mode_map(prompt, VIS_MODE_INSERT, true, "<Tab>", &prompt_tab_binding);
 	vis_mode_switch(vis, VIS_MODE_INSERT);
+	vis->prompt_state = PROMPTSTATE_ONELINE;
+	vis->ui.selwin = prompt;
 }
 
 void vis_info_show(Vis *vis, const char *msg, ...) {
@@ -196,8 +200,8 @@ void vis_message_show(Vis *vis, const char *msg) {
 		return;
 	Text *txt = win->file->text;
 	size_t pos = text_size(txt);
-	text_appendf(txt, "%s\n", msg);
-	text_save(txt, NULL);
+	text_appendf(vis, txt, "%s\n", msg);
+	text_mark_current_revision(txt);
 	view_cursors_to(win->view.selection, pos);
 	vis_window_focus(win);
 }

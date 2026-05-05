@@ -14,7 +14,6 @@
 -- @tparam string key the key to associate with the new operator
 -- @tparam function operator the operator logic implemented as Lua function
 -- @tparam[opt] string help the single line help text as displayed in `:help`
--- @treturn bool whether the new operator could be installed
 -- @usage
 -- vis:operator_new("gq", function(file, range, pos)
 -- 	local status, out, err = vis:pipe(file, range, "fmt")
@@ -29,9 +28,6 @@
 --
 vis.operator_new = function(vis, key, operator, help)
 	local id = vis:operator_register(operator)
-	if id < 0 then
-		return false
-	end
 	local binding = function()
 		vis:operator(id)
 	end
@@ -50,7 +46,6 @@ end
 -- @tparam string key the key to associate with the new option
 -- @tparam function motion the motion logic implemented as Lua function
 -- @tparam[opt] string help the single line help text as displayed in `:help`
--- @treturn bool whether the new motion could be installed
 -- @usage
 -- vis:motion_new("<C-l>", function(win, pos)
 -- 	return pos+1
@@ -58,9 +53,6 @@ end
 --
 vis.motion_new = function(vis, key, motion, help)
 	local id = vis:motion_register(motion)
-	if id < 0 then
-		return false
-	end
 	local binding = function()
 		vis:motion(id)
 	end
@@ -79,7 +71,6 @@ end
 -- @tparam string key the key associated with the new text object
 -- @tparam function textobject the text object logic implemented as Lua function
 -- @tparam[opt] string help the single line help text as displayed in `:help`
--- @treturn bool whether the new text object could be installed
 -- @usage
 -- vis:textobject_new("<C-l>", function(win, pos)
 -- 	return pos, pos+1
@@ -87,9 +78,6 @@ end
 --
 vis.textobject_new = function(vis, key, textobject, help)
 	local id = vis:textobject_register(textobject)
-	if id < 0 then
-		return false
-	end
 	local binding = function()
 		vis:textobject(id)
 	end
@@ -272,6 +260,7 @@ vis.types.window.set_syntax = function(win, syntax)
 	win:style_define(win.STYLE_SEPARATOR, lexers.STYLE_SEPARATOR or '')
 	win:style_define(win.STYLE_INFO, lexers.STYLE_INFO or '')
 	win:style_define(win.STYLE_EOF, lexers.STYLE_EOF or '')
+	win:style_define(win.STYLE_WHITESPACE, lexers.STYLE_WHITESPACE or '')
 
 	if syntax == nil or syntax == 'off' then
 		win.syntax = nil
@@ -286,14 +275,10 @@ vis.types.window.set_syntax = function(win, syntax)
 	for id, token_name in ipairs(lexer._TAGS) do
 		local style = lexers['STYLE_' .. token_name:upper():gsub("%.", "_")] or ''
 		if type(style) == 'table' then
-			local s = ''
-			if style.attr then
-				s = string.format("%s,%s", s, style.attr)
-			elseif style.fore then
-				s = string.format("%s,fore:%s", s, style.fore)
-			elseif style.back then
-				s = string.format("%s,back:%s", s, style.back)
-			end
+			local s
+			if style.attr then s = tostring(style.attr) end
+			if style.fore then s = (s and s .. ',' or '') .. 'fore:' .. tostring(style.fore) end
+			if style.back then s = (s and s .. ',' or '') .. 'back:' .. tostring(style.back) end
 			style = s
 		end
 		if style ~= nil then win:style_define(id, style) end

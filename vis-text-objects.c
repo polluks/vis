@@ -1,35 +1,30 @@
 #include "vis-core.h"
-#include "text-objects.h"
-#include "util.h"
 
-int vis_textobject_register(Vis *vis, int type, void *data, VisTextObjectFunction *textobject) {
-
-	TextObject *obj = calloc(1, sizeof *obj);
-	if (!obj)
-		return -1;
-
-	obj->user = textobject;
-	obj->type = type;
-	obj->data = data;
-
-	if (array_add_ptr(&vis->textobjects, obj))
-		return LENGTH(vis_textobjects) + vis->textobjects.len - 1;
-	free(obj);
-	return -1;
+int vis_textobject_register(Vis *vis, int type, void *data, VisTextObjectFunction *textobject)
+{
+	*da_push(vis, &vis->textobjects) = (TextObject){
+		.user = textobject,
+		.type = type,
+		.data = data,
+	};
+	return LENGTH(vis_textobjects) + vis->textobjects.count - 1;
 }
 
 bool vis_textobject(Vis *vis, enum VisTextObject id) {
+
+	vis->action.textobj = 0;
 	if (id < LENGTH(vis_textobjects))
-		vis->action.textobj = &vis_textobjects[id];
-	else
-		vis->action.textobj = array_get_ptr(&vis->textobjects, id - LENGTH(vis_textobjects));
+		vis->action.textobj = vis_textobjects + id;
+	else if ((VisDACount)id - LENGTH(vis_textobjects) < vis->textobjects.count)
+		vis->action.textobj = vis->textobjects.data + id - LENGTH(vis_textobjects);
+
 	if (!vis->action.textobj)
 		return false;
 	vis_do(vis);
 	return true;
 }
 
-static Filerange search_forward(Vis *vis, Text *txt, size_t pos) {
+static Filerange vis_text_object_search_forward(Vis *vis, Text *txt, size_t pos) {
 	Filerange range = text_range_empty();
 	Regex *regex = vis_regex(vis, NULL);
 	if (regex)
@@ -38,7 +33,7 @@ static Filerange search_forward(Vis *vis, Text *txt, size_t pos) {
 	return range;
 }
 
-static Filerange search_backward(Vis *vis, Text *txt, size_t pos) {
+static Filerange vis_text_object_search_backward(Vis *vis, Text *txt, size_t pos) {
 	Filerange range = text_range_empty();
 	Regex *regex = vis_regex(vis, NULL);
 	if (regex)
@@ -183,11 +178,11 @@ const TextObject vis_textobjects[] = {
 		.txt = text_object_indentation,
 	},
 	[VIS_TEXTOBJECT_SEARCH_FORWARD] = {
-		.vis = search_forward,
+		.vis = vis_text_object_search_forward,
 		.type = TEXTOBJECT_NON_CONTIGUOUS|TEXTOBJECT_EXTEND_FORWARD,
 	},
 	[VIS_TEXTOBJECT_SEARCH_BACKWARD] = {
-		.vis = search_backward,
+		.vis = vis_text_object_search_backward,
 		.type = TEXTOBJECT_NON_CONTIGUOUS|TEXTOBJECT_EXTEND_BACKWARD,
 	},
 };

@@ -1,11 +1,4 @@
-#include <stdio.h>
-#include <string.h>
-#include <ctype.h>
 #include "vis-core.h"
-#include "text-motions.h"
-#include "text-objects.h"
-#include "text-util.h"
-#include "util.h"
 
 static Regex *search_word(Vis *vis, Text *txt, size_t pos) {
 	char expr[512];
@@ -45,20 +38,27 @@ static size_t search_word_backward(Vis *vis, Text *txt, size_t pos) {
 	return pos;
 }
 
-static size_t search_forward(Vis *vis, Text *txt, size_t pos) {
-	Regex *regex = vis_regex(vis, NULL);
-	if (regex)
-		pos = text_search_forward(txt, pos, regex);
+static size_t search_common(Vis *vis, Text *txt, size_t pos, bool backward) {
+	const char *pattern = register_get(vis, &vis->registers[VIS_REG_SEARCH], NULL);
+	Regex *regex = vis_regex(vis, pattern);
+	if (regex) {
+		size_t newpos = backward ?
+			text_search_backward(txt, pos, regex) :
+			text_search_forward(txt, pos, regex);
+		if (newpos == pos)
+			vis_info_show(vis, "Pattern not found: `%s'", pattern);
+		pos = newpos;
+	}
 	text_regex_free(regex);
 	return pos;
 }
 
+static size_t search_forward(Vis *vis, Text *txt, size_t pos) {
+	return search_common(vis, txt, pos, false);
+}
+
 static size_t search_backward(Vis *vis, Text *txt, size_t pos) {
-	Regex *regex = vis_regex(vis, NULL);
-	if (regex)
-		pos = text_search_backward(txt, pos, regex);
-	text_regex_free(regex);
-	return pos;
+	return search_common(vis, txt, pos, true);
 }
 
 static size_t common_word_next(Vis *vis, Text *txt, size_t pos,
@@ -261,19 +261,13 @@ void vis_motion_type(Vis *vis, enum VisMotionType type) {
 	vis->action.type = type;
 }
 
-int vis_motion_register(Vis *vis, void *data, VisMotionFunction *motion) {
-
-	Movement *move = calloc(1, sizeof *move);
-	if (!move)
-		return -1;
-
-	move->user = motion;
-	move->data = data;
-
-	if (array_add_ptr(&vis->motions, move))
-		return VIS_MOVE_LAST + vis->motions.len - 1;
-	free(move);
-	return -1;
+int vis_motion_register(Vis *vis, void *data, VisMotionFunction *motion)
+{
+	*da_push(vis, &vis->motions) = (Movement){
+		.user = motion,
+		.data = data,
+	};
+	return VIS_MOVE_LAST + vis->motions.count - 1;
 }
 
 bool vis_motion(Vis *vis, enum VisMotion motion, ...) {
@@ -376,10 +370,11 @@ bool vis_motion(Vis *vis, enum VisMotion motion, ...) {
 		break;
 	}
 
+	vis->action.movement = 0;
 	if (motion < LENGTH(vis_motions))
-		vis->action.movement = &vis_motions[motion];
-	else
-		vis->action.movement = array_get_ptr(&vis->motions, motion - VIS_MOVE_LAST);
+		vis->action.movement = vis_motions + motion;
+	else if ((VisDACount)motion - VIS_MOVE_LAST < vis->motions.count)
+		vis->action.movement = vis->motions.data + motion - VIS_MOVE_LAST;
 
 	if (!vis->action.movement)
 		goto err;

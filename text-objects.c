@@ -1,16 +1,3 @@
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
-#include "text-motions.h"
-#include "text-objects.h"
-#include "text-util.h"
-#include "util.h"
-
-#define blank(c) ((c) == ' ' || (c) == '\t')
-#define space(c) (isspace((unsigned char)c))
-#define boundary(c) (isboundary((unsigned char)c))
-
 Filerange text_object_entire(Text *txt, size_t pos) {
 	return text_range_new(0, text_size(txt));
 }
@@ -24,26 +11,26 @@ static Filerange text_object_customword(Text *txt, size_t pos, int (*isboundary)
 	if (pos > 0 && text_iterator_byte_prev(&it, &prev))
 		text_iterator_byte_next(&it, NULL);
 	text_iterator_byte_next(&it, &next);
-	if (space(c)) {
+	if (IsSpace(c)) {
 		r.start = text_char_next(txt, text_customword_end_prev(txt, pos, isboundary));
 		r.end = text_customword_start_next(txt, pos, isboundary);
-	} else if (boundary(c)) {
-		if (boundary(prev) && !space(prev))
+	} else if (IsBoundary(c)) {
+		if (IsBoundary(prev) && !IsSpace(prev))
 			r.start = text_customword_start_prev(txt, pos, isboundary);
 		else
 			r.start = pos;
 
-		if (boundary(next) && !space(next))
+		if (IsBoundary(next) && !IsSpace(next))
 			r.end = text_char_next(txt, text_customword_end_next(txt, pos, isboundary));
 		else
 			r.end = text_char_next(txt, pos);
 	} else {
-		if (boundary(prev))
+		if (IsBoundary(prev))
 			r.start = pos;
 		else
 			r.start = text_customword_start_prev(txt, pos, isboundary);
 
-		if (boundary(next))
+		if (IsBoundary(next))
 			r.end = text_char_next(txt, pos);
 		else
 			r.end = text_char_next(txt, text_customword_end_next(txt, pos, isboundary));
@@ -69,12 +56,12 @@ static Filerange text_object_customword_outer(Text *txt, size_t pos, int (*isbou
 	if (pos > 0 && text_iterator_byte_prev(&it, &prev))
 		text_iterator_byte_next(&it, NULL);
 	text_iterator_byte_next(&it, &next);
-	if (space(c)) {
+	if (IsSpace(c)) {
 		/* middle of two words, include leading white space */
 		r.start = text_char_next(txt, text_customword_end_prev(txt, pos, isboundary));
 		r.end = text_char_next(txt, text_customword_end_next(txt, pos, isboundary));
-	} else if (boundary(prev) && boundary(next)) {
-		if (boundary(c)) {
+	} else if (IsBoundary(prev) && IsBoundary(next)) {
+		if (IsBoundary(c)) {
 			r.start = text_char_next(txt, text_customword_end_prev(txt, pos, isboundary));
 			r.end = text_word_start_next(txt, text_customword_end_next(txt, pos, isboundary));
 		} else {
@@ -82,11 +69,11 @@ static Filerange text_object_customword_outer(Text *txt, size_t pos, int (*isbou
 			r.start = pos;
 			r.end = text_customword_start_next(txt, pos, isboundary);
 		}
-	} else if (boundary(prev)) {
+	} else if (IsBoundary(prev)) {
 		/* at start of a word */
 		r.start = pos;
 		r.end = text_customword_start_next(txt, text_customword_end_next(txt, pos, isboundary), isboundary);
-	} else if (boundary(next)) {
+	} else if (IsBoundary(next)) {
 		/* at end of a word */
 		r.start = text_customword_start_prev(txt, pos, isboundary);
 		r.end = text_customword_start_next(txt, pos, isboundary);
@@ -174,23 +161,23 @@ static bool text_line_blank(Text *txt, size_t pos) {
 	char c;
 	bool b = true;
 	Iterator it = text_iterator_get(txt, text_line_begin(txt, pos));
-	while (text_iterator_byte_get(&it, &c) && c != '\n' && (b = blank(c)))
+	while (text_iterator_byte_get(&it, &c) && c != '\n' && (b = IsBlank(c)))
 		text_iterator_char_next(&it, NULL);
 	return b;
 }
 
 Filerange text_object_paragraph(Text *txt, size_t pos) {
-	char c;
+	char c = 0;
 	Filerange r;
 	if (text_line_blank(txt, pos)) {
 		Iterator it = text_iterator_get(txt, pos), rit = it;
-		while (text_iterator_byte_get(&rit, &c) && (c == '\n' || blank(c)))
+		while (text_iterator_byte_get(&rit, &c) && (c == '\n' || IsBlank(c)))
 			text_iterator_byte_prev(&rit, NULL);
-		if (c == '\n' || blank(c))
+		if (c == '\n' || IsBlank(c))
 			r.start = rit.pos;
 		else
 			r.start = text_line_next(txt, rit.pos);
-		while (text_iterator_byte_get(&it, &c) && (c == '\n' || blank(c)))
+		while (text_iterator_byte_get(&it, &c) && (c == '\n' || IsBlank(c)))
 			text_iterator_byte_next(&it, NULL);
 		if (it.pos == text_size(txt))
 			r.end = rit.pos;
@@ -319,6 +306,10 @@ Filerange text_object_indentation(Text *txt, size_t pos) {
 	size_t line_indent = sol - bol;
 	bool line_empty = text_byte_get(txt, bol, &c) && c == '\n';
 
+	/* NOTE: gcc spits a warning otherwise, this is probably not possible but something
+	 * about how text_line_{begin,start} are implemented makes gcc think otherwise */
+	line_indent = MIN(line_indent, PTRDIFF_MAX);
+
 	char *buf = text_bytes_alloc0(txt, bol, line_indent);
 	char *tmp = malloc(line_indent);
 
@@ -384,10 +375,10 @@ Filerange text_range_inner(Text *txt, Filerange *rin) {
 	char c;
 	Filerange r = *rin;
 	Iterator it = text_iterator_get(txt, rin->start);
-	while (text_iterator_byte_get(&it, &c) && space(c))
+	while (text_iterator_byte_get(&it, &c) && IsSpace(c))
 		text_iterator_byte_next(&it, NULL);
 	r.start = it.pos;
 	it = text_iterator_get(txt, rin->end);
-	do r.end = it.pos; while (text_iterator_byte_prev(&it, &c) && space(c));
+	do r.end = it.pos; while (text_iterator_byte_prev(&it, &c) && IsSpace(c));
 	return r;
 }

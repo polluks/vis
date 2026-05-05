@@ -1,13 +1,7 @@
 #ifndef TEXT_H
 #define TEXT_H
 
-#include <stdbool.h>
-#include <stdint.h>
-#include <time.h>
-#include <unistd.h>
-#include <stdarg.h>
-#include <sys/types.h>
-#include <sys/stat.h>
+#include "util.h"
 
 /** A mark. */
 typedef uintptr_t Mark;
@@ -23,18 +17,17 @@ typedef struct {
 	size_t end;    /**< Absolute byte position. */
 } Filerange;
 
+typedef struct {
+	Filerange  *data;
+	VisDACount  count;
+	VisDACount  capacity;
+} FilerangeList;
+
 /**
  * Text object storing the buffer content being edited.
  */
 typedef struct Text Text;
 typedef struct Piece Piece;
-typedef struct TextSave TextSave;
-
-/** A contiguous part of the text. */
-typedef struct {
-	const char *data; /**< Content, might not be NUL-terminated. */
-	size_t len;       /**< Length in bytes. */
-} TextString;
 
 /**
  * Iterator used to navigate the buffer content.
@@ -91,11 +84,10 @@ enum TextLoadMethod {
  * Create a text instance populated with the given file content.
  *
  * @rst
- * .. note:: Equivalent to ``text_load_method(filename, TEXT_LOAD_AUTO)``.
+ * .. note:: Equivalent to ``text_load_method(vis, filename, TEXT_LOAD_AUTO)``.
  * @endrst
  */
-Text *text_load(const char *filename);
-Text *text_loadat(int dirfd, const char *filename);
+VIS_INTERNAL Text *text_load(Vis *vis, const char *filename);
 /**
  * Create a text instance populated with the given file content.
  *
@@ -109,17 +101,17 @@ Text *text_loadat(int dirfd, const char *filename);
  *    - ``ENOTSUP`` otherwise.
  * @endrst
  */
-Text *text_load_method(const char *filename, enum TextLoadMethod method);
-Text *text_loadat_method(int dirfd, const char *filename, enum TextLoadMethod);
+VIS_INTERNAL Text *text_load_method(Vis *vis, const char *filename, enum TextLoadMethod method);
+VIS_INTERNAL Text *text_loadat_method(Vis *vis, int dirfd, const char *filename, enum TextLoadMethod);
 /** Release all resources associated with this text instance. */
-void text_free(Text*);
+VIS_INTERNAL void text_free(Text*);
 /**
  * @}
  * @defgroup state Text State
  * @{
  */
 /** Return the size in bytes of the whole text. */
-size_t text_size(const Text*);
+VIS_INTERNAL size_t text_size(const Text*);
 /**
  * Get file information at time of load or last save, whichever happened more
  * recently.
@@ -130,9 +122,9 @@ size_t text_size(const Text*);
  * @endrst
  * @return See ``stat(2)`` for details.
  */
-struct stat text_stat(const Text*);
+VIS_INTERNAL struct stat text_stat(const Text*);
 /** Query whether the text contains any unsaved modifications. */
-bool text_modified(const Text*);
+VIS_INTERNAL bool text_modified(const Text*);
 /**
  * @}
  * @defgroup modify Text Modification
@@ -141,13 +133,14 @@ bool text_modified(const Text*);
 /**
  * Insert data at the given byte position.
  *
+ * @param vis The editor instance.
  * @param txt The text instance to modify.
  * @param pos The absolute byte position.
  * @param data The data to insert.
  * @param len The length of the data in bytes.
  * @return Whether the insertion succeeded.
  */
-bool text_insert(Text *txt, size_t pos, const char *data, size_t len);
+VIS_INTERNAL bool text_insert(Vis *vis, Text *txt, size_t pos, const char *data, size_t len);
 /**
  * Delete data at given byte position.
  *
@@ -156,10 +149,9 @@ bool text_insert(Text *txt, size_t pos, const char *data, size_t len);
  * @param len The number of bytes to delete, starting from ``pos``.
  * @return Whether the deletion succeeded.
  */
-bool text_delete(Text *txt, size_t pos, size_t len);
-bool text_delete_range(Text *txt, const Filerange*);
-bool text_printf(Text *txt, size_t pos, const char *format, ...) __attribute__((format(printf, 3, 4)));
-bool text_appendf(Text *txt, const char *format, ...) __attribute__((format(printf, 2, 3)));
+VIS_INTERNAL bool text_delete(Text *txt, size_t pos, size_t len);
+VIS_INTERNAL bool text_delete_range(Text *txt, const Filerange*);
+VIS_INTERNAL bool text_appendf(Vis *vis, Text *txt, const char *format, ...) __attribute__((format(printf, 3, 4)));
 /**
  * @}
  * @defgroup history Undo/Redo History
@@ -168,7 +160,7 @@ bool text_appendf(Text *txt, const char *format, ...) __attribute__((format(prin
 /**
  * Create a text snapshot, that is a vertex in the history graph.
  */
-bool text_snapshot(Text*);
+VIS_INTERNAL void text_snapshot(Text*);
 /**
  * Revert to previous snapshot along the main branch.
  * @rst
@@ -177,7 +169,7 @@ bool text_snapshot(Text*);
  * @return The position of the first change or ``EPOS``, if already at the
  *         oldest state i.e. there was nothing to undo.
  */
-size_t text_undo(Text*);
+VIS_INTERNAL size_t text_undo(Text*);
 /**
  * Reapply an older change along the main branch.
  * @rst
@@ -186,27 +178,27 @@ size_t text_undo(Text*);
  * @return The position of the first change or ``EPOS``, if already at the
  *         newest state i.e. there was nothing to redo.
  */
-size_t text_redo(Text*);
-size_t text_earlier(Text*);
-size_t text_later(Text*);
+VIS_INTERNAL size_t text_redo(Text*);
+VIS_INTERNAL size_t text_earlier(Text*);
+VIS_INTERNAL size_t text_later(Text*);
 /**
  * Restore the text to the state closest to the time given
  */
-size_t text_restore(Text*, time_t);
+VIS_INTERNAL size_t text_restore(Text*, time_t);
 /**
  * Get creation time of current state.
  * @rst
  * .. note:: TODO: This is currently not the same as the time of the last snapshot.
  * @endrst
  */
-time_t text_state(const Text*);
+VIS_INTERNAL time_t text_state(const Text*);
 /**
  * @}
  * @defgroup lines Line Operations
  * @{
  */
-size_t text_pos_by_lineno(Text*, size_t lineno);
-size_t text_lineno_by_pos(Text*, size_t pos);
+VIS_INTERNAL size_t text_pos_by_lineno(Text*, size_t lineno);
+VIS_INTERNAL size_t text_lineno_by_pos(Text*, size_t pos);
 
 /**
  * @}
@@ -224,7 +216,7 @@ size_t text_lineno_by_pos(Text*, size_t pos);
  *           return an artificial NUL byte at EOF.
  * @endrst
  */
-bool text_byte_get(const Text *txt, size_t pos, char *byte);
+VIS_INTERNAL bool text_byte_get(const Text *txt, size_t pos, char *byte);
 /**
  * Store at most ``len`` bytes starting from ``pos`` into ``buf``.
  * @param txt The text instance to modify.
@@ -236,7 +228,7 @@ bool text_byte_get(const Text *txt, size_t pos, char *byte);
  * .. warning:: ``buf`` will not be NUL terminated.
  * @endrst
  */
-size_t text_bytes_get(const Text *txt, size_t pos, size_t len, char *buf);
+VIS_INTERNAL size_t text_bytes_get(const Text *txt, size_t pos, size_t len, char *buf);
 /**
  * Fetch text range into newly allocate memory region.
  * @param txt The text instance to modify.
@@ -248,44 +240,44 @@ size_t text_bytes_get(const Text *txt, size_t pos, size_t len, char *buf);
  * .. warning:: The returned pointer must be freed by the caller.
  * @endrst
  */
-char *text_bytes_alloc0(const Text *txt, size_t pos, size_t len);
+VIS_INTERNAL char *text_bytes_alloc0(const Text *txt, size_t pos, size_t len);
 /**
  * @}
  * @defgroup iterator Text Iterators
  * @{
  */
-Iterator text_iterator_get(const Text*, size_t pos);
-bool text_iterator_init(const Text*, Iterator*, size_t pos);
-const Text *text_iterator_text(const Iterator*);
-bool text_iterator_valid(const Iterator*);
-bool text_iterator_has_next(const Iterator*);
-bool text_iterator_has_prev(const Iterator*);
-bool text_iterator_next(Iterator*);
-bool text_iterator_prev(Iterator*);
+VIS_INTERNAL Iterator text_iterator_get(const Text*, size_t pos);
+VIS_INTERNAL bool text_iterator_init(const Text*, Iterator*, size_t pos);
+VIS_INTERNAL const Text *text_iterator_text(const Iterator*);
+VIS_INTERNAL bool text_iterator_valid(const Iterator*);
+VIS_INTERNAL bool text_iterator_has_next(const Iterator*);
+VIS_INTERNAL bool text_iterator_has_prev(const Iterator*);
+VIS_INTERNAL bool text_iterator_next(Iterator*);
+VIS_INTERNAL bool text_iterator_prev(Iterator*);
 /**
  * @}
  * @defgroup iterator_byte Byte Iterators
  * @{
  */
-bool text_iterator_byte_get(const Iterator*, char *b);
-bool text_iterator_byte_prev(Iterator*, char *b);
-bool text_iterator_byte_next(Iterator*, char *b);
-bool text_iterator_byte_find_prev(Iterator*, char b);
-bool text_iterator_byte_find_next(Iterator*, char b);
+VIS_INTERNAL bool text_iterator_byte_get(const Iterator*, char *b);
+VIS_INTERNAL bool text_iterator_byte_prev(Iterator*, char *b);
+VIS_INTERNAL bool text_iterator_byte_next(Iterator*, char *b);
+VIS_INTERNAL bool text_iterator_byte_find_prev(Iterator*, char b);
+VIS_INTERNAL bool text_iterator_byte_find_next(Iterator*, char b);
 /**
  * @}
  * @defgroup iterator_code Codepoint Iterators
  * @{
  */
-bool text_iterator_codepoint_next(Iterator *it, char *c);
-bool text_iterator_codepoint_prev(Iterator *it, char *c);
+VIS_INTERNAL bool text_iterator_codepoint_next(Iterator *it, char *c);
+VIS_INTERNAL bool text_iterator_codepoint_prev(Iterator *it, char *c);
 /**
  * @}
  * @defgroup iterator_char Character Iterators
  * @{
  */
-bool text_iterator_char_next(Iterator*, char *c);
-bool text_iterator_char_prev(Iterator*, char *c);
+VIS_INTERNAL bool text_iterator_char_next(Iterator*, char *c);
+VIS_INTERNAL bool text_iterator_char_prev(Iterator*, char *c);
 /**
  * @}
  * @defgroup mark Marks
@@ -301,14 +293,14 @@ bool text_iterator_char_prev(Iterator*, char *c);
  * @param pos The position at which to store the mark.
  * @return The mark or ``EMARK`` if an invalid position was given.
  */
-Mark text_mark_set(Text *txt, size_t pos);
+VIS_INTERNAL Mark text_mark_set(Text *txt, size_t pos);
 /**
  * Lookup a mark.
  * @param txt The text instance to modify.
  * @param mark The mark to look up.
  * @return The byte position or ``EPOS`` for an invalid mark.
  */
-size_t text_mark_get(const Text *txt, Mark mark);
+VIS_INTERNAL size_t text_mark_get(const Text *txt, Mark mark);
 /**
  * @}
  * @defgroup save Text Saving
@@ -350,20 +342,22 @@ enum TextSaveMethod {
 	TEXT_SAVE_INPLACE,
 };
 
+/* used to hold context between text_save_{begin,commit} calls */
+typedef struct {
+	enum TextSaveMethod method; /* method used to save file */
+	Text *txt;                 /* text to operate on */
+	const char *filename;      /* filename to save to */
+	str8 tmpname;              /* temporary name used for atomic rename(2) */
+	int fd;                    /* file descriptor to write data to using text_save_write */
+	int dirfd;                 /* directory file descriptor, relative to which we save */
+} TextSave;
+
+#define text_save_default(...) (TextSave){.dirfd = AT_FDCWD, .fd = -1, __VA_ARGS__}
+
 /**
- * Save the whole text to the given file name.
- *
- * @rst
- * .. note:: Equivalent to ``text_save_method(filename, TEXT_SAVE_AUTO)``.
- * @endrst
+ * Marks the current text revision as saved.
  */
-bool text_save(Text*, const char *filename);
-bool text_saveat(Text*, int dirfd, const char *filename);
-/**
- * Save the whole text to the given file name, using the specified method.
- */
-bool text_save_method(Text*, const char *filename, enum TextSaveMethod);
-bool text_saveat_method(Text*, int dirfd, const char *filename, enum TextSaveMethod);
+VIS_INTERNAL void text_mark_current_revision(Text*);
 
 /**
  * Setup a sequence of write operations.
@@ -376,12 +370,12 @@ bool text_saveat_method(Text*, int dirfd, const char *filename, enum TextSaveMet
  *              ``text_save_cancel`` to release the underlying resources.
  * @endrst
  */
-TextSave *text_save_begin(Text*, int dirfd, const char *filename, enum TextSaveMethod);
+VIS_INTERNAL bool text_save_begin(TextSave*);
 /**
  * Write file range.
  * @return The number of bytes written or ``-1`` in case of an error.
  */
-ssize_t text_save_write_range(TextSave*, const Filerange*);
+VIS_INTERNAL ssize_t text_save_write_range(TextSave*, const Filerange*);
 /**
  * Commit changes to disk.
  * @return Whether changes have been saved.
@@ -390,7 +384,7 @@ ssize_t text_save_write_range(TextSave*, const Filerange*);
  *           pointer which must no longer be used.
  * @endrst
  */
-bool text_save_commit(TextSave*);
+VIS_INTERNAL bool text_save_commit(TextSave*);
 /**
  * Abort a save operation.
  * @rst
@@ -399,17 +393,12 @@ bool text_save_commit(TextSave*);
  *           frees the given ``TextSave`` pointer which must no longer be used.
  * @endrst
  */
-void text_save_cancel(TextSave*);
-/**
- * Write whole text content to file descriptor.
- * @return The number of bytes written or ``-1`` in case of an error.
- */
-ssize_t text_write(const Text*, int fd);
+VIS_INTERNAL void text_save_cancel(TextSave*);
 /**
  * Write file range to file descriptor.
  * @return The number of bytes written or ``-1`` in case of an error.
  */
-ssize_t text_write_range(const Text*, const Filerange*, int fd);
+VIS_INTERNAL ssize_t text_write_range(const Text*, const Filerange*, int fd);
 /**
  * @}
  * @defgroup misc Miscellaneous
@@ -419,13 +408,250 @@ ssize_t text_write_range(const Text*, const Filerange*, int fd);
  * Check whether ``ptr`` is part of a memory mapped region associated with
  * this text instance.
  */
-bool text_mmaped(const Text*, const char *ptr);
+VIS_INTERNAL bool text_mmaped(const Text*, const char *ptr);
 
 /**
  * Write complete buffer to file descriptor.
  * @return The number of bytes written or ``-1`` in case of an error.
  */
-ssize_t write_all(int fd, const char *buf, size_t count);
+VIS_INTERNAL ssize_t write_all(int fd, const char *buf, size_t count);
+/** @} */
+
+/*
+ * @defgroup regex Text Regular Expression Handling
+ * @{
+ */
+
+/* make the REG_* constants available */
+#if CONFIG_TRE
+  #include <tre/tre.h>
+#else
+  #include <regex.h>
+#endif
+
+#define MAX_REGEX_SUB 10
+
+typedef struct Regex Regex;
+typedef Filerange RegexMatch;
+
+VIS_INTERNAL Regex *text_regex_new(void);
+VIS_INTERNAL int text_regex_compile(Regex*, const char *pattern, int cflags);
+VIS_INTERNAL size_t text_regex_nsub(Regex*);
+VIS_INTERNAL void text_regex_free(Regex*);
+VIS_INTERNAL int text_regex_match(Regex*, const char *data, int eflags);
+VIS_INTERNAL int text_search_range_forward(Text*, size_t pos, size_t len, Regex *r, size_t nmatch, RegexMatch pmatch[], int eflags);
+VIS_INTERNAL int text_search_range_backward(Text*, size_t pos, size_t len, Regex *r, size_t nmatch, RegexMatch pmatch[], int eflags);
+
+/** @} */
+
+/*
+ * @defgroup motions Text Motions
+ * @{
+ */
+
+/* these functions all take a position in bytes from the start of the file,
+ * perform a certain movement and return the new position. If the movement
+ * is not possible the original position is returned unchanged. */
+
+/* char refers to a grapheme (might skip over multiple Unicode codepoints) */
+VIS_INTERNAL size_t text_char_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_char_prev(Text*, size_t pos);
+
+VIS_INTERNAL size_t text_codepoint_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_codepoint_prev(Text*, size_t pos);
+
+/* find the given substring either in forward or backward direction.
+ * does not wrap around at file start / end. If no match is found return
+ * original position */
+VIS_INTERNAL size_t text_find_next(Text*, size_t pos, const char *s);
+VIS_INTERNAL size_t text_find_prev(Text*, size_t pos, const char *s);
+/* same as above but limit searched range to the line containing pos */
+VIS_INTERNAL size_t text_line_find_next(Text*, size_t pos, const char *s);
+VIS_INTERNAL size_t text_line_find_prev(Text*, size_t pos, const char *s);
+
+/*    begin            finish    next
+ *    v                v         v
+ *  \n      I am a line!       \n
+ *  ^       ^                  ^
+ *  prev    start              end
+ */
+VIS_INTERNAL size_t text_line_prev(Text*, size_t pos);
+VIS_INTERNAL size_t text_line_begin(Text*, size_t pos);
+VIS_INTERNAL size_t text_line_start(Text*, size_t pos);
+VIS_INTERNAL size_t text_line_finish(Text*, size_t pos);
+VIS_INTERNAL size_t text_line_end(Text*, size_t pos);
+VIS_INTERNAL size_t text_line_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_line_offset(Text*, size_t pos, size_t off);
+/* get grapheme count of the line upto `pos' */
+VIS_INTERNAL int text_line_char_get(Text*, size_t pos);
+/* get position of the `count' grapheme in the line containing `pos' */
+VIS_INTERNAL size_t text_line_char_set(Text*, size_t pos, int count);
+/* get display width of line upto `pos' */
+VIS_INTERNAL int text_line_width_get(Text*, size_t pos);
+/* get position of character being displayed at `width' in line containing `pos' */
+VIS_INTERNAL size_t text_line_width_set(Text*, size_t pos, int width);
+/* move to the next/previous grapheme on the same line */
+VIS_INTERNAL size_t text_line_char_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_line_char_prev(Text*, size_t pos);
+/* move to start of next/previous blank line */
+VIS_INTERNAL size_t text_line_blank_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_line_blank_prev(Text*, size_t pos);
+/* move to same offset in previous/next line */
+VIS_INTERNAL size_t text_line_up(Text*, size_t pos);
+VIS_INTERNAL size_t text_line_down(Text*, size_t pos);
+/* functions to iterate over all line beginnings in a given range */
+VIS_INTERNAL size_t text_range_line_first(Text*, Filerange*);
+VIS_INTERNAL size_t text_range_line_next(Text*, Filerange*, size_t pos);
+/*
+ * A longword consists of a sequence of non-blank characters, separated with
+ * white space. TODO?: An empty line is also considered to be a word.
+ * This is equivalent to a WORD in vim terminology.
+ */
+VIS_INTERNAL size_t text_longword_end_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_longword_end_prev(Text*, size_t pos);
+VIS_INTERNAL size_t text_longword_start_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_longword_start_prev(Text*, size_t pos);
+/*
+ * A word consists of a sequence of letters, digits and underscores, or a
+ * sequence of other non-blank characters, separated with white space.
+ * TODO?: An empty line is also considered to be a word.
+ * This is equivalent to a word (lowercase) in vim terminology.
+ */
+VIS_INTERNAL size_t text_word_end_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_word_end_prev(Text*, size_t pos);
+VIS_INTERNAL size_t text_word_start_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_word_start_prev(Text*, size_t pos);
+/*
+ * More general versions of the above, define your own word boundaries.
+ */
+VIS_INTERNAL size_t text_customword_start_next(Text*, size_t pos, int (*isboundary)(int));
+VIS_INTERNAL size_t text_customword_start_prev(Text*, size_t pos, int (*isboundary)(int));
+VIS_INTERNAL size_t text_customword_end_next(Text*, size_t pos, int (*isboundary)(int));
+VIS_INTERNAL size_t text_customword_end_prev(Text*, size_t pos, int (*isboundary)(int));
+/* TODO: implement the following semantics
+ * A sentence is defined as ending at a '.', '!' or '?' followed by either the
+ * end of a line, or by a space or tab.  Any number of closing ')', ']', '"'
+ * and ''' characters may appear after the '.', '!' or '?' before the spaces,
+ * tabs or end of line.  A paragraph and section boundary is also a sentence
+ * boundary.
+ */
+VIS_INTERNAL size_t text_sentence_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_sentence_prev(Text*, size_t pos);
+/* TODO: implement the following semantics
+ * A paragraph begins after each empty line. A section boundary is also a
+ * paragraph boundary. Note that a blank line (only containing white space)
+ * is NOT a paragraph boundary.
+ */
+VIS_INTERNAL size_t text_paragraph_next(Text*, size_t pos);
+VIS_INTERNAL size_t text_paragraph_prev(Text*, size_t pos);
+/* A section begins after a form-feed in the first column.
+size_t text_section_next(Text*, size_t pos);
+size_t text_section_prev(Text*, size_t pos);
+*/
+VIS_INTERNAL size_t text_block_start(Text*, size_t pos);
+VIS_INTERNAL size_t text_block_end(Text*, size_t pos);
+VIS_INTERNAL size_t text_parenthesis_start(Text*, size_t pos);
+VIS_INTERNAL size_t text_parenthesis_end(Text*, size_t pos);
+/* search corresponding '(', ')', '{', '}', '[', ']', '>', '<', '"', ''' */
+VIS_INTERNAL size_t text_bracket_match(Text*, size_t pos, const Filerange *limits);
+/* same as above but explicitly specify symbols to match */
+VIS_INTERNAL size_t text_bracket_match_symbol(Text*, size_t pos, const char *symbols, const Filerange *limits);
+
+/* search the given regex pattern in either forward or backward direction,
+ * starting from pos. Does wrap around if no match was found. */
+VIS_INTERNAL size_t text_search_forward(Text *txt, size_t pos, Regex *regex);
+VIS_INTERNAL size_t text_search_backward(Text *txt, size_t pos, Regex *regex);
+
+/* is c a special symbol delimiting a word? */
+VIS_INTERNAL int is_word_boundary(int c);
+
+/** @} */
+
+/*
+ * @defgroup objects Text Objects
+ * @{
+ */
+
+/* these functions all take a file position. If this position is part of the
+ * respective text-object, a corresponding range is returned. If there is no
+ * such text-object at the given location, an empty range is returned.
+ */
+
+/* return range covering the entire text */
+VIS_INTERNAL Filerange text_object_entire(Text*, size_t pos);
+/* word which happens to be at pos without any neighbouring white spaces */
+VIS_INTERNAL Filerange text_object_word(Text*, size_t pos);
+/* includes trailing white spaces. If at pos happens to be a white space
+ * include all neighbouring leading white spaces and the following word. */
+VIS_INTERNAL Filerange text_object_word_outer(Text*, size_t pos);
+/* find next occurrence of `word' (as word not substring) in forward/backward direction */
+VIS_INTERNAL Filerange text_object_word_find_next(Text*, size_t pos, const char *word);
+VIS_INTERNAL Filerange text_object_word_find_prev(Text*, size_t pos, const char *word);
+/* find next occurrence of a literal string (not regex) in forward/backward direction */
+VIS_INTERNAL Filerange text_object_find_next(Text *txt, size_t pos, const char *search);
+VIS_INTERNAL Filerange text_object_find_prev(Text *txt, size_t pos, const char *search);
+/* same semantics as above but for a longword (i.e. delimited by white spaces) */
+VIS_INTERNAL Filerange text_object_longword(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_longword_outer(Text*, size_t pos);
+
+VIS_INTERNAL Filerange text_object_line(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_line_inner(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_sentence(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_paragraph(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_paragraph_outer(Text*, size_t pos);
+
+/* these are inner text objects i.e. the delimiters themself are not
+ * included in the range */
+VIS_INTERNAL Filerange text_object_square_bracket(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_curly_bracket(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_angle_bracket(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_parenthesis(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_quote(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_single_quote(Text*, size_t pos);
+VIS_INTERNAL Filerange text_object_backtick(Text*, size_t pos);
+/* match a search term in either forward or backward direction */
+VIS_INTERNAL Filerange text_object_search_forward(Text*, size_t pos, Regex*);
+VIS_INTERNAL Filerange text_object_search_backward(Text*, size_t pos, Regex*);
+/* match all lines with same indentation level as the current one */
+VIS_INTERNAL Filerange text_object_indentation(Text*, size_t pos);
+
+/* extend a range to cover whole lines */
+VIS_INTERNAL Filerange text_range_linewise(Text*, Filerange*);
+/* trim leading and trailing white spaces from range */
+VIS_INTERNAL Filerange text_range_inner(Text*, Filerange*);
+/* test whether a given range covers whole lines */
+VIS_INTERNAL bool text_range_is_linewise(Text*, Filerange*);
+
+/** @} */
+
+/*
+ * @defgroup util Utilities
+ * @{
+ */
+
+/* test whether the given range is valid (start <= end) */
+#define text_range_valid(r) ((r)->start != EPOS && (r)->end != EPOS && (r)->start <= (r)->end)
+/* get the size of the range (end-start) or zero if invalid */
+#define text_range_size(r) (text_range_valid(r) ? (r)->end - (r)->start : 0)
+/* create an empty / invalid range of size zero */
+#define text_range_empty() (Filerange){.start = EPOS, .end = EPOS}
+/* merge two ranges into a new one which contains both of them */
+VIS_INTERNAL Filerange text_range_union(const Filerange*, const Filerange*);
+/* get intersection of two ranges */
+VIS_INTERNAL Filerange text_range_intersect(const Filerange*, const Filerange*);
+/* create new range [min(a,b), max(a,b)] */
+VIS_INTERNAL Filerange text_range_new(size_t a, size_t b);
+/* test whether two ranges are equal */
+VIS_INTERNAL bool text_range_equal(const Filerange*, const Filerange*);
+/* test whether two ranges overlap */
+VIS_INTERNAL bool text_range_overlap(const Filerange*, const Filerange*);
+/* test whether a given position is within a certain range */
+VIS_INTERNAL bool text_range_contains(const Filerange*, size_t pos);
+/* count the number of graphemes in data */
+VIS_INTERNAL int text_char_count(const char *data, size_t len);
+/* get the approximate display width of data */
+VIS_INTERNAL int text_string_width(const char *data, size_t len);
+
 /** @} */
 
 #endif

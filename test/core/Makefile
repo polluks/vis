@@ -1,34 +1,29 @@
 -include ../../config.mk
 
-ALL = buffer-test map-test array-test text-test
+ALL = buffer-test map-test text-test
 SRC = $(wildcard ccan/*/*.c)
-CFLAGS += -I. -I../.. -DBUFFER_SIZE=4 -DBLOCK_SIZE=4
+CFLAGS += -Wno-unused-function -I. -I../.. -DBUFFER_SIZE=4 -DBLOCK_SIZE=4
 
 test: $(ALL)
 	@./buffer-test
 	@./map-test
-	@./array-test
 	@./text-test
 
 config.h:
 	@echo Generating ccan configuration header
 	@${CC} ccan-config.c -o ccan-config && ./ccan-config "${CC}" ${CFLAGS} > config.h
 
-text-test: config.h text-test.c ../../text.c ../../text-common.c ../../text-io.c ../../text-iterator.c ../../text-util.c ../../text-motions.c ../../text-objects.c ../../text-regex.c ../../array.c
+text-test: config.h text-test.c ../../text.c ../../text-common.c ../../text-io.c ../../text-iterator.c ../../text-util.c ../../text-motions.c ../../text-objects.c ../../text-regex.c
 	@echo Compiling $@ binary
-	@${CC} ${CFLAGS} ${CFLAGS_STD} ${CFLAGS_LIBC} ${CFLAGS_EXTRA} ${filter %.c, $^} ${SRC} ${LDFLAGS} -o $@
+	@${CC} ${CFLAGS} ${CFLAGS_STD} ${CFLAGS_EXTRA} text-test.c ${SRC} ${LDFLAGS} -o $@
 
 buffer-test: config.h buffer-test.c ../../buffer.c
 	@echo Compiling $@ binary
-	@${CC} ${CFLAGS} ${CFLAGS_STD} ${CFLAGS_LIBC} ${CFLAGS_EXTRA} buffer-test.c ${SRC} ${LDFLAGS} -o $@
+	@${CC} ${CFLAGS} ${CFLAGS_STD} ${CFLAGS_EXTRA} buffer-test.c ${SRC} ${LDFLAGS} -o $@
 
 map-test: config.h map-test.c ../../map.c
 	@echo Compiling $@ binary
-	@${CC} ${CFLAGS} ${CFLAGS_STD} ${CFLAGS_LIBC} ${CFLAGS_EXTRA} ${filter %.c, $^} ${SRC} ${LDFLAGS} -o $@
-
-array-test: config.h array-test.c ../../array.c
-	@echo Compiling $@ binary
-	@${CC} ${CFLAGS} ${CFLAGS_STD} ${CFLAGS_LIBC} ${CFLAGS_EXTRA} ${filter %.c, $^} ${SRC} ${LDFLAGS} -o $@
+	@${CC} ${CFLAGS} ${CFLAGS_STD} ${CFLAGS_EXTRA} map-test.c ${SRC} ${LDFLAGS} -o $@
 
 debug: clean
 	$(MAKE) CFLAGS_EXTRA='${CFLAGS_EXTRA} ${CFLAGS_DEBUG}'

@@ -1,11 +1,3 @@
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE /* memrchr(3) is non-standard */
-#endif
-#include <limits.h>
-#include <stddef.h>
-#include <errno.h>
-#include <wchar.h>
-#include <string.h>
 #include "text.h"
 #include "util.h"
 
@@ -74,7 +66,7 @@ bool text_iterator_byte_prev(Iterator *it, char *b) {
 
 bool text_iterator_byte_find_prev(Iterator *it, char b) {
 	while (it->text) {
-		const char *match = memrchr(it->start, b, it->text - it->start);
+		const char *match = memory_scan_reverse(it->start, b, it->text - it->start);
 		if (match) {
 			it->pos -= it->text - match;
 			it->text = match;
@@ -101,10 +93,10 @@ bool text_iterator_byte_find_next(Iterator *it, char b) {
 }
 
 bool text_iterator_codepoint_next(Iterator *it, char *c) {
-	while (text_iterator_byte_next(it, NULL)) {
-		if (ISUTF8(*it->text)) {
-			if (c)
-				*c = *it->text;
+	char test_byte;
+	while (text_iterator_byte_next(it, &test_byte)) {
+		if (ISUTF8(test_byte)) {
+			if (c) *c = test_byte;
 			return true;
 		}
 	}
@@ -112,10 +104,10 @@ bool text_iterator_codepoint_next(Iterator *it, char *c) {
 }
 
 bool text_iterator_codepoint_prev(Iterator *it, char *c) {
-	while (text_iterator_byte_prev(it, NULL)) {
-		if (ISUTF8(*it->text)) {
-			if (c)
-				*c = *it->text;
+	char test_byte;
+	while (text_iterator_byte_prev(it, &test_byte)) {
+		if (ISUTF8(test_byte)) {
+			if (c) *c = test_byte;
 			return true;
 		}
 	}

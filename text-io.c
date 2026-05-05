@@ -1,33 +1,3 @@
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <libgen.h>
-#include <stdio.h>
-#include <errno.h>
-#include <string.h>
-#include <limits.h>
-#include <sys/mman.h>
-#if CONFIG_ACL
-#include <sys/acl.h>
-#endif
-#if CONFIG_SELINUX
-#include <selinux/selinux.h>
-#endif
-
-#include "text.h"
-#include "text-internal.h"
-#include "text-util.h"
-#include "util.h"
-
-struct TextSave {                  /* used to hold context between text_save_{begin,commit} calls */
-	Text *txt;                 /* text to operate on */
-	char *filename;            /* filename to save to as given to text_save_begin */
-	char *tmpname;             /* temporary name used for atomic rename(2) */
-	int fd;                    /* file descriptor to write data to using text_save_write */
-	int dirfd;                 /* directory file descriptor, relative to which we save */
-	enum TextSaveMethod type;  /* method used to save file */
-};
-
 /* Allocate blocks holding the actual file content in chunks of size: */
 #ifndef BLOCK_SIZE
 #define BLOCK_SIZE (1 << 20)
@@ -38,7 +8,8 @@ struct TextSave {                  /* used to hold context between text_save_{be
 #define BLOCK_MMAP_SIZE (1 << 26)
 
 /* allocate a new block of MAX(size, BLOCK_SIZE) bytes */
-Block *block_alloc(size_t size) {
+static Block *block_alloc(size_t size)
+{
 	Block *blk = calloc(1, sizeof *blk);
 	if (!blk)
 		return NULL;
@@ -53,7 +24,19 @@ Block *block_alloc(size_t size) {
 	return blk;
 }
 
-Block *block_read(size_t size, int fd) {
+static void block_free(Block *blk)
+{
+	if (!blk)
+		return;
+	if (blk->type == BLOCK_TYPE_MALLOC)
+		free(blk->data);
+	else if ((blk->type == BLOCK_TYPE_MMAP_ORIG || blk->type == BLOCK_TYPE_MMAP) && blk->data)
+		munmap(blk->data, blk->size);
+	free(blk);
+}
+
+static Block *block_read(size_t size, int fd)
+{
 	Block *blk = block_alloc(size);
 	if (!blk)
 		return NULL;
@@ -61,7 +44,7 @@ Block *block_read(size_t size, int fd) {
 	size_t rem = size;
 	while (rem > 0) {
 		ssize_t len = read(fd, data, rem);
-		if (len == -1) {
+		if (len == -1 && errno != EINTR) {
 			block_free(blk);
 			return NULL;
 		} else if (len == 0) {
@@ -75,7 +58,8 @@ Block *block_read(size_t size, int fd) {
 	return blk;
 }
 
-Block *block_mmap(size_t size, int fd, off_t offset) {
+static Block *block_mmap(size_t size, int fd, off_t offset)
+{
 	Block *blk = calloc(1, sizeof *blk);
 	if (!blk)
 		return NULL;
@@ -92,7 +76,8 @@ Block *block_mmap(size_t size, int fd, off_t offset) {
 	return blk;
 }
 
-Block *block_load(int dirfd, const char *filename, enum TextLoadMethod method, struct stat *info) {
+static Block *block_load(int dirfd, const char *filename, enum TextLoadMethod method, struct stat *info)
+{
 	Block *block = NULL;
 	int fd = openat(dirfd, filename, O_RDONLY);
 	if (fd == -1)
@@ -118,23 +103,15 @@ out:
 	return block;
 }
 
-void block_free(Block *blk) {
-	if (!blk)
-		return;
-	if (blk->type == BLOCK_TYPE_MALLOC)
-		free(blk->data);
-	else if ((blk->type == BLOCK_TYPE_MMAP_ORIG || blk->type == BLOCK_TYPE_MMAP) && blk->data)
-		munmap(blk->data, blk->size);
-	free(blk);
-}
-
 /* check whether block has enough free space to store len bytes */
-bool block_capacity(Block *blk, size_t len) {
+static bool block_capacity(Block *blk, size_t len)
+{
 	return blk->size - blk->len >= len;
 }
 
 /* append data to block, assumes there is enough space available */
-const char *block_append(Block *blk, const char *data, size_t len) {
+static const char *block_append(Block *blk, const char *data, size_t len)
+{
 	char *dest = memcpy(blk->data + blk->len, data, len);
 	blk->len += len;
 	return dest;
@@ -142,7 +119,8 @@ const char *block_append(Block *blk, const char *data, size_t len) {
 
 /* insert data into block at an arbitrary position, this should only be used with
  * data of the most recently created piece. */
-bool block_insert(Block *blk, size_t pos, const char *data, size_t len) {
+static bool block_insert(Block *blk, size_t pos, const char *data, size_t len)
+{
 	if (pos > blk->len || !block_capacity(blk, len))
 		return false;
 	if (blk->len == pos)
@@ -156,7 +134,8 @@ bool block_insert(Block *blk, size_t pos, const char *data, size_t len) {
 
 /* delete data from a block at an arbitrary position, this should only be used with
  * data of the most recently created piece. */
-bool block_delete(Block *blk, size_t pos, size_t len) {
+static bool block_delete(Block *blk, size_t pos, size_t len)
+{
 	size_t end;
 	if (!addu(pos, len, &end) || end > blk->len)
 		return false;
@@ -170,16 +149,40 @@ bool block_delete(Block *blk, size_t pos, size_t len) {
 	return true;
 }
 
-Text *text_load(const char *filename) {
-	return text_load_method(filename, TEXT_LOAD_AUTO);
+static Block *text_block_mmaped(Text *txt)
+{
+	Block *result = 0;
+	if (txt->count > 0 && txt->data[0]->type == BLOCK_TYPE_MMAP_ORIG && txt->data[0]->size)
+		result = txt->data[0];
+	return result;
 }
 
-Text *text_loadat(int dirfd, const char *filename) {
-	return text_loadat_method(dirfd, filename, TEXT_LOAD_AUTO);
+/* preserve the current text content such that it can be restored by
+ * means of undo/redo operations */
+void text_snapshot(Text *txt)
+{
+	if (txt->current_revision)
+		txt->last_revision = txt->current_revision;
+	txt->current_revision = NULL;
+	txt->cache = NULL;
 }
 
-Text *text_load_method(const char *filename, enum TextLoadMethod method) {
-	return text_loadat_method(AT_FDCWD, filename, method);
+static void text_saved(Text *txt, struct stat *meta)
+{
+	if (meta)
+		txt->info = *meta;
+	txt->saved_revision = txt->history;
+	text_snapshot(txt);
+}
+
+Text *text_load(Vis *vis, const char *filename)
+{
+	return text_load_method(vis, filename, TEXT_LOAD_AUTO);
+}
+
+Text *text_load_method(Vis *vis, const char *filename, enum TextLoadMethod method)
+{
+	return text_loadat_method(vis, AT_FDCWD, filename, method);
 }
 
 ssize_t write_all(int fd, const char *buf, size_t count) {
@@ -266,7 +269,8 @@ err:
  *   - POSIX ACL can not be preserved (if enabled)
  *   - SELinux security context can not be preserved (if enabled)
  */
-static bool text_save_begin_atomic(TextSave *ctx) {
+static bool text_save_begin_atomic(TextSave *ctx)
+{
 	int oldfd, saved_errno;
 	if ((oldfd = openat(ctx->dirfd, ctx->filename, O_RDONLY)) == -1 && errno != ENOENT)
 		goto err;
@@ -280,22 +284,19 @@ static bool text_save_begin_atomic(TextSave *ctx) {
 			goto err;
 	}
 
+	str8 base, dir, fname = str8_from_c_str((char *)ctx->filename);
+	path_split(fname, &dir, &base);
+
 	char suffix[] = ".vis.XXXXXX";
-	size_t len = strlen(ctx->filename) + sizeof("./.") + sizeof(suffix);
-	char *dir = strdup(ctx->filename);
-	char *base = strdup(ctx->filename);
+	size_t len = fname.length + sizeof("./.") + sizeof(suffix);
 
-	if (!(ctx->tmpname = malloc(len)) || !dir || !base) {
-		free(dir);
-		free(base);
+	if (!(ctx->tmpname.data = malloc(len)))
 		goto err;
-	}
 
-	snprintf(ctx->tmpname, len, "%s/.%s%s", dirname(dir), basename(base), suffix);
-	free(dir);
-	free(base);
+	ctx->tmpname.length = snprintf((char *)ctx->tmpname.data, len, "%.*s/.%.*s%s",
+	                               (int)dir.length, dir.data, (int)base.length, base.data, suffix);
 
-	if ((ctx->fd = mkstempat(ctx->dirfd, ctx->tmpname)) == -1)
+	if ((ctx->fd = mkstempat(ctx->dirfd, (char *)ctx->tmpname.data)) == -1)
 		goto err;
 
 	if (oldfd == -1) {
@@ -318,17 +319,11 @@ static bool text_save_begin_atomic(TextSave *ctx) {
 		close(oldfd);
 	}
 
-	ctx->type = TEXT_SAVE_ATOMIC;
 	return true;
 err:
 	saved_errno = errno;
 	if (oldfd != -1)
 		close(oldfd);
-	if (ctx->fd != -1)
-		close(ctx->fd);
-	ctx->fd = -1;
-	free(ctx->tmpname);
-	ctx->tmpname = NULL;
 	errno = saved_errno;
 	return false;
 }
@@ -346,13 +341,21 @@ static bool text_save_commit_atomic(TextSave *ctx) {
 	if (close_failed)
 		return false;
 
-	if (renameat(ctx->dirfd, ctx->tmpname, ctx->dirfd, ctx->filename) == -1)
+	if (renameat(ctx->dirfd, (char *)ctx->tmpname.data, ctx->dirfd, ctx->filename) == -1)
 		return false;
 
-	free(ctx->tmpname);
-	ctx->tmpname = NULL;
 
-	int dir = openat(ctx->dirfd, dirname(ctx->filename), O_DIRECTORY|O_RDONLY);
+	str8 directory;
+	path_split(ctx->tmpname, &directory, 0);
+	/* NOTE: tmpname was allocated by us, no issue with writing a 0 into it;
+	 * however, we may have gotten a static "." back so we shouldn't write in that case. */
+	if (directory.data[directory.length] != 0) directory.data[directory.length] = 0;
+
+	int dir = openat(ctx->dirfd, (char *)directory.data, O_DIRECTORY|O_RDONLY);
+
+	free(ctx->tmpname.data);
+	ctx->tmpname.data = 0;
+
 	if (dir == -1)
 		return false;
 
@@ -407,15 +410,11 @@ static bool text_save_begin_inplace(TextSave *ctx) {
 	 * here we are screwed, TODO: make a backup before? */
 	if (ftruncate(ctx->fd, 0) == -1)
 		goto err;
-	ctx->type = TEXT_SAVE_INPLACE;
 	return true;
 err:
 	saved_errno = errno;
 	if (newfd != -1)
 		close(newfd);
-	if (ctx->fd != -1)
-		close(ctx->fd);
-	ctx->fd = -1;
 	errno = saved_errno;
 	return false;
 }
@@ -432,103 +431,49 @@ static bool text_save_commit_inplace(TextSave *ctx) {
 	return true;
 }
 
-TextSave *text_save_begin(Text *txt, int dirfd, const char *filename, enum TextSaveMethod type) {
-	if (!filename)
-		return NULL;
-	TextSave *ctx = calloc(1, sizeof *ctx);
-	if (!ctx)
-		return NULL;
-	ctx->txt = txt;
-	ctx->fd = -1;
-	ctx->dirfd = dirfd;
-	if (!(ctx->filename = strdup(filename)))
-		goto err;
+bool text_save_begin(TextSave *ctx) {
+	enum TextSaveMethod type = ctx->method;
 	errno = 0;
-	if ((type == TEXT_SAVE_AUTO || type == TEXT_SAVE_ATOMIC) && text_save_begin_atomic(ctx))
-		return ctx;
+	if ((type == TEXT_SAVE_AUTO || type == TEXT_SAVE_ATOMIC) && text_save_begin_atomic(ctx)) {
+		ctx->method = TEXT_SAVE_ATOMIC;
+		return true;
+	}
 	if (errno == ENOSPC)
 		goto err;
-	if ((type == TEXT_SAVE_AUTO || type == TEXT_SAVE_INPLACE) && text_save_begin_inplace(ctx))
-		return ctx;
+	if ((type == TEXT_SAVE_AUTO || type == TEXT_SAVE_INPLACE) && text_save_begin_inplace(ctx)) {
+		ctx->method = TEXT_SAVE_INPLACE;
+		return true;
+	}
 err:
 	text_save_cancel(ctx);
-	return NULL;
-}
-
-bool text_save_commit(TextSave *ctx) {
-	if (!ctx)
-		return true;
-	bool ret;
-	switch (ctx->type) {
-	case TEXT_SAVE_ATOMIC:
-		ret = text_save_commit_atomic(ctx);
-		break;
-	case TEXT_SAVE_INPLACE:
-		ret = text_save_commit_inplace(ctx);
-		break;
-	default:
-		ret = false;
-		break;
-	}
-
-	text_save_cancel(ctx);
-	return ret;
+	return false;
 }
 
 void text_save_cancel(TextSave *ctx) {
-	if (!ctx)
-		return;
 	int saved_errno = errno;
 	if (ctx->fd != -1)
 		close(ctx->fd);
-	if (ctx->tmpname && ctx->tmpname[0])
-		unlinkat(ctx->dirfd, ctx->tmpname, 0);
-	free(ctx->tmpname);
-	free(ctx->filename);
-	free(ctx);
+	if (ctx->tmpname.data && ctx->tmpname.data[0])
+		unlinkat(ctx->dirfd, (char *)ctx->tmpname.data, 0);
+	free(ctx->tmpname.data);
 	errno = saved_errno;
 }
 
-/* First try to save the file atomically using rename(2) if this does not
- * work overwrite the file in place. However if something goes wrong during
- * this overwrite the original file is permanently damaged.
- */
-bool text_save(Text *txt, const char *filename) {
-	return text_saveat(txt, AT_FDCWD, filename);
-}
-
-bool text_saveat(Text *txt, int dirfd, const char *filename) {
-	return text_saveat_method(txt, dirfd, filename, TEXT_SAVE_AUTO);
-}
-
-bool text_save_method(Text *txt, const char *filename, enum TextSaveMethod method) {
-	return text_saveat_method(txt, AT_FDCWD, filename, method);
-}
-
-bool text_saveat_method(Text *txt, int dirfd, const char *filename, enum TextSaveMethod method) {
-	if (!filename) {
-		text_saved(txt, NULL);
-		return true;
+bool text_save_commit(TextSave *ctx) {
+	bool result = false;
+	switch (ctx->method) {
+	case TEXT_SAVE_ATOMIC:  result = text_save_commit_atomic(ctx);  break;
+	case TEXT_SAVE_INPLACE: result = text_save_commit_inplace(ctx); break;
+	default: break;
 	}
-	TextSave *ctx = text_save_begin(txt, dirfd, filename, method);
-	if (!ctx)
-		return false;
-	Filerange range = (Filerange){ .start = 0, .end = text_size(txt) };
-	ssize_t written = text_save_write_range(ctx, &range);
-	if (written == -1 || (size_t)written != text_range_size(&range)) {
-		text_save_cancel(ctx);
-		return false;
-	}
-	return text_save_commit(ctx);
+	text_save_cancel(ctx);
+	return result;
 }
+
+void text_mark_current_revision(Text *txt) { text_saved(txt, 0); }
 
 ssize_t text_save_write_range(TextSave *ctx, const Filerange *range) {
 	return text_write_range(ctx->txt, range, ctx->fd);
-}
-
-ssize_t text_write(const Text *txt, int fd) {
-	Filerange r = (Filerange){ .start = 0, .end = text_size(txt) };
-	return text_write_range(txt, &r, fd);
 }
 
 ssize_t text_write_range(const Text *txt, const Filerange *range, int fd) {

@@ -1,10 +1,4 @@
-#include <string.h>
-#include <ctype.h>
 #include "vis-core.h"
-#include "text-motions.h"
-#include "text-objects.h"
-#include "text-util.h"
-#include "util.h"
 
 static size_t op_delete(Vis *vis, Text *txt, OperatorContext *c) {
 	c->reg->linewise = c->linewise;
@@ -68,11 +62,11 @@ static size_t op_put(Vis *vis, Text *txt, OperatorContext *c) {
 	for (int i = 0; i < c->count; i++) {
 		char nl;
 		if (c->reg->linewise && pos > 0 && text_byte_get(txt, pos-1, &nl) && nl != '\n')
-			pos += text_insert(txt, pos, "\n", 1);
-		text_insert(txt, pos, data, len);
+			pos += text_insert(vis, txt, pos, "\n", 1);
+		text_insert(vis, txt, pos, data, len);
 		pos += len;
 		if (c->reg->linewise && pos > 0 && text_byte_get(txt, pos-1, &nl) && nl != '\n')
-			pos += text_insert(txt, pos, "\n", 1);
+			pos += text_insert(vis, txt, pos, "\n", 1);
 	}
 
 	if (c->reg->linewise) {
@@ -101,7 +95,7 @@ static size_t op_put(Vis *vis, Text *txt, OperatorContext *c) {
 }
 
 static size_t op_shift_right(Vis *vis, Text *txt, OperatorContext *c) {
-	char spaces[9] = "         ";
+	char spaces[9] = "        ";
 	spaces[MIN(vis->win->view.tabwidth, LENGTH(spaces) - 1)] = '\0';
 	const char *tab = vis->win->expandtab ? spaces : "\t";
 	size_t tablen = strlen(tab);
@@ -117,7 +111,7 @@ static size_t op_shift_right(Vis *vis, Text *txt, OperatorContext *c) {
 		size_t end = text_line_end(txt, pos);
 		prev_pos = pos = text_line_begin(txt, end);
 		if ((!multiple_lines || pos != end) &&
-		    text_insert(txt, pos, tab, tablen) && pos <= c->pos)
+		    text_insert(vis, txt, pos, tab, tablen) && pos <= c->pos)
 			newpos += tablen;
 		pos = text_line_prev(txt, pos);
 	}  while (pos >= c->range.start && pos != prev_pos);
@@ -197,7 +191,7 @@ static size_t op_join(Vis *vis, Text *txt, OperatorContext *c) {
 		char prev, next;
 		if (text_byte_get(txt, pos-1, &prev) && !isspace((unsigned char)prev) &&
 		    text_byte_get(txt, pos, &next) && next != '\n')
-			text_insert(txt, pos, c->arg->s, len);
+			text_insert(vis, txt, pos, c->arg->s, len);
 		if (mark == EMARK)
 			mark = text_mark_set(txt, pos);
 	} while (pos != prev_pos);
@@ -218,23 +212,22 @@ static size_t op_replace(Vis *vis, Text *txt, OperatorContext *c) {
 	op_delete(vis, txt, c);
 	size_t pos = c->range.start;
 	for (size_t len = strlen(c->arg->s); count > 0; pos += len, count--)
-		text_insert(txt, pos, c->arg->s, len);
+		text_insert(vis, txt, pos, c->arg->s, len);
 	return c->range.start;
 }
 
-int vis_operator_register(Vis *vis, VisOperatorFunction *func, void *context) {
-	Operator *op = calloc(1, sizeof *op);
-	if (!op)
-		return -1;
-	op->func = func;
-	op->context = context;
-	if (array_add_ptr(&vis->operators, op))
-		return VIS_OP_LAST + vis->operators.len - 1;
-	free(op);
-	return -1;
+int vis_operator_register(Vis *vis, VisOperatorFunction *func, void *context)
+{
+	*da_push(vis, &vis->operators) = (Operator){
+		.func    = func,
+		.context = context,
+	};
+	return VIS_OP_LAST + vis->operators.count - 1;
 }
 
-bool vis_operator(Vis *vis, enum VisOperator id, ...) {
+bool vis_operator(Vis *vis, enum VisOperator id, ...)
+{
+	bool result = true;
 	va_list ap;
 	va_start(ap, id);
 
@@ -281,14 +274,16 @@ bool vis_operator(Vis *vis, enum VisOperator id, ...) {
 		break;
 	}
 
-	const Operator *op = NULL;
+	const Operator *op = 0;
 	if (id < LENGTH(vis_operators))
-		op = &vis_operators[id];
-	else
-		op = array_get_ptr(&vis->operators, id - VIS_OP_LAST);
+		op = vis_operators + id;
+	else if ((VisDACount)id - VIS_OP_LAST < vis->operators.count)
+		op = vis->operators.data + id - VIS_OP_LAST;
 
-	if (!op)
-		goto err;
+	if (!op) {
+		result = false;
+		goto out;
+	}
 
 	if (vis->mode->visual) {
 		vis->action.op = op;
@@ -314,10 +309,7 @@ bool vis_operator(Vis *vis, enum VisOperator id, ...) {
 
 out:
 	va_end(ap);
-	return true;
-err:
-	va_end(ap);
-	return false;
+	return result;
 }
 
 const Operator vis_operators[] = {

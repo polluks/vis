@@ -11,20 +11,7 @@
  * @license ISC
  * @release RELEASE
  */
-#include <stddef.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <string.h>
-#include <limits.h>
-#include <unistd.h>
-#include <libgen.h>
-#include <sys/types.h>
-#include <pwd.h>
-
-#include "vis-lua.h"
 #include "vis-core.h"
-#include "text-motions.h"
-#include "util.h"
 
 #ifndef VIS_PATH
 #define VIS_PATH "/usr/local/share/vis"
@@ -202,20 +189,22 @@ static bool func_ref_get(lua_State *L, const void *addr) {
  *   registry["vis.types"][metatable] = type
  *
  * leaves the metatable at the top of the stack.
+ * IMPORTANT: expects 0 terminated type
  */
-static void obj_type_new(lua_State *L, const char *type) {
-	luaL_newmetatable(L, type);
+static void obj_type_new(lua_State *L, str8 type)
+{
+	luaL_newmetatable(L, (char *)type.data);
 	lua_getglobal(L, "vis");
 	if (!lua_isnil(L, -1)) {
 		lua_getfield(L, -1, "types");
 		lua_pushvalue(L, -3);
-		lua_setfield(L, -2, type);
+		lua_setfield(L, -2, (char *)type.data);
 		lua_pop(L, 1);
 	}
 	lua_pop(L, 1);
 	lua_getfield(L, LUA_REGISTRYINDEX, "vis.types");
 	lua_pushvalue(L, -2);
-	lua_pushstring(L, type);
+	lua_pushlstring(L, (char *)type.data, type.length);
 	lua_settable(L, -3);
 	lua_pop(L, 1);
 }
@@ -369,6 +358,13 @@ static void *obj_lightref_check(lua_State *L, int idx, const char *type) {
 	return *addr;
 }
 
+static Vis *lua_get_vis(lua_State *L)
+{
+	lua_getglobal(L, "vis");
+	Vis *result = luaL_checkudata(L, -1, "vis");
+	return result;
+}
+
 static int index_common(lua_State *L) {
 	lua_getmetatable(L, 1);
 	lua_pushvalue(L, 2);
@@ -390,7 +386,7 @@ static int newindex_common(lua_State *L) {
 }
 
 static size_t getpos(lua_State *L, int narg) {
-	return lua_tounsigned(L, narg);
+	return (size_t)lua_tointeger(L, narg);
 }
 
 static size_t checkpos(lua_State *L, int narg) {
@@ -408,7 +404,7 @@ static void pushpos(lua_State *L, size_t pos) {
 	if (pos == EPOS)
 		lua_pushnil(L);
 	else
-		lua_pushunsigned(L, pos);
+		lua_pushinteger(L, pos);
 }
 
 static void pushrange(lua_State *L, Filerange *r) {
@@ -417,11 +413,11 @@ static void pushrange(lua_State *L, Filerange *r) {
 		return;
 	}
 	lua_createtable(L, 0, 2);
-	lua_pushstring(L, "start");
-	lua_pushunsigned(L, r->start);
+	lua_pushliteral(L, "start");
+	lua_pushinteger(L, r->start);
 	lua_settable(L, -3);
-	lua_pushstring(L, "finish");
-	lua_pushunsigned(L, r->end);
+	lua_pushliteral(L, "finish");
+	lua_pushinteger(L, r->end);
 	lua_settable(L, -3);
 }
 
@@ -710,7 +706,7 @@ err:
 }
 
 static int keymap(lua_State *L, Vis *vis, Win *win) {
-	int mode = luaL_checkint(L, 2);
+	int mode = luaL_checkinteger(L, 2);
 	const char *key = luaL_checkstring(L, 3);
 	const char *help = luaL_optstring(L, 5, NULL);
 	KeyBinding *binding = vis_binding_new(vis);
@@ -816,7 +812,7 @@ static int map(lua_State *L) {
  * @see Window:unmap
  */
 static int keyunmap(lua_State *L, Vis *vis, Win *win) {
-	enum VisMode mode = luaL_checkint(L, 2);
+	enum VisMode mode = luaL_checkinteger(L, 2);
 	const char *key = luaL_checkstring(L, 3);
 	bool ret;
 	if (!win)
@@ -862,7 +858,7 @@ static bool binding_collect(const char *key, void *value, void *ctx) {
 static int mappings(lua_State *L) {
 	Vis *vis = obj_ref_check(L, 1, "vis");
 	lua_newtable(L);
-	for (Mode *mode = mode_get(vis, luaL_checkint(L, 2)); mode; mode = mode->parent) {
+	for (Mode *mode = mode_get(vis, luaL_checkinteger(L, 2)); mode; mode = mode->parent) {
 		if (!mode->bindings)
 			continue;
 		map_iterate(mode->bindings, binding_collect, vis->lua);
@@ -880,7 +876,7 @@ static int mappings(lua_State *L) {
  */
 static int motion(lua_State *L) {
 	Vis *vis = obj_ref_check(L, 1, "vis");
-	enum VisMotion id = luaL_checkunsigned(L, 2);
+	enum VisMotion id = luaL_checkinteger(L, 2);
 	// TODO handle var args?
 	lua_pushboolean(L, vis && vis_motion(vis, id));
 	return 1;
@@ -888,10 +884,10 @@ static int motion(lua_State *L) {
 
 static size_t motion_lua(Vis *vis, Win *win, void *data, size_t pos) {
 	lua_State *L = vis->lua;
-	if (!L || !func_ref_get(L, data) || !obj_ref_new(L, win, VIS_LUA_TYPE_WINDOW))
+	if (!func_ref_get(L, data) || !obj_ref_new(L, win, VIS_LUA_TYPE_WINDOW))
 		return EPOS;
 
-	lua_pushunsigned(L, pos);
+	lua_pushinteger(L, pos);
 	if (pcall(vis, L, 2, 1) != 0)
 		return EPOS;
 	return getpos(L, -1);
@@ -902,7 +898,7 @@ static size_t motion_lua(Vis *vis, Win *win, void *data, size_t pos) {
  *
  * @function motion_register
  * @tparam function motion the Lua function implementing the motion
- * @treturn int the associated motion id, or `-1` on failure
+ * @treturn int the associated motion id
  * @see motion, motion_new
  * @local
  * @usage
@@ -929,7 +925,7 @@ static int motion_register(lua_State *L) {
  */
 static int operator(lua_State *L) {
 	Vis *vis = obj_ref_check(L, 1, "vis");
-	enum VisOperator id = luaL_checkunsigned(L, 2);
+	enum VisOperator id = luaL_checkinteger(L, 2);
 	// TODO handle var args?
 	lua_pushboolean(L, vis && vis_operator(vis, id));
 	return 1;
@@ -937,7 +933,7 @@ static int operator(lua_State *L) {
 
 static size_t operator_lua(Vis *vis, Text *text, OperatorContext *c) {
 	lua_State *L = vis->lua;
-	if (!L || !func_ref_get(L, c->context))
+	if (!func_ref_get(L, c->context))
 		return EPOS;
 	File *file = vis->files;
 	while (file && (file->internal || file->text != text))
@@ -956,7 +952,7 @@ static size_t operator_lua(Vis *vis, Text *text, OperatorContext *c) {
  *
  * @function operator_register
  * @tparam function operator the Lua function implementing the operator
- * @treturn int the associated operator id, or `-1` on failure
+ * @treturn int the associated operator id
  * @see operator, operator_new
  * @local
  * @usage
@@ -988,16 +984,16 @@ static int operator_register(lua_State *L) {
  */
 static int textobject(lua_State *L) {
 	Vis *vis = obj_ref_check(L, 1, "vis");
-	enum VisTextObject id = luaL_checkunsigned(L, 2);
+	enum VisTextObject id = luaL_checkinteger(L, 2);
 	lua_pushboolean(L, vis_textobject(vis, id));
 	return 1;
 }
 
 static Filerange textobject_lua(Vis *vis, Win *win, void *data, size_t pos) {
 	lua_State *L = vis->lua;
-	if (!L || !func_ref_get(L, data) || !obj_ref_new(L, win, VIS_LUA_TYPE_WINDOW))
+	if (!func_ref_get(L, data) || !obj_ref_new(L, win, VIS_LUA_TYPE_WINDOW))
 		return text_range_empty();
-	lua_pushunsigned(L, pos);
+	lua_pushinteger(L, pos);
 	if (pcall(vis, L, 2, 2) != 0 || lua_isnil(L, -1))
 		return text_range_empty();
 	return text_range_new(getpos(L, -2), getpos(L, -1));
@@ -1028,7 +1024,7 @@ static int textobject_register(lua_State *L) {
 static bool option_lua(Vis *vis, Win *win, void *context, bool toggle,
                        enum VisOption flags, const char *name, Arg *value) {
 	lua_State *L = vis->lua;
-	if (!L || !func_ref_get(L, context))
+	if (!func_ref_get(L, context))
 		return false;
 	if (flags & VIS_OPTION_TYPE_BOOL)
 		lua_pushboolean(L, value->b);
@@ -1099,7 +1095,7 @@ static bool command_lua(Vis *vis, Win *win, void *data, bool force, const char *
 		return false;
 	lua_newtable(L);
 	for (size_t i = 0; argv[i]; i++) {
-		lua_pushunsigned(L, i);
+		lua_pushinteger(L, i);
 		lua_pushstring(L, argv[i]);
 		lua_settable(L, -3);
 	}
@@ -1144,6 +1140,39 @@ static int command_register(lua_State *L) {
 	bool ret = vis_cmd_register(vis, name, help, (void*)func, command_lua);
 	lua_pushboolean(L, ret);
 	return 1;
+}
+
+/***
+ * Let user pick a command matching the given prefix.
+ *
+ * The editor core will be blocked while the external process is running.
+ *
+ * @function complete_command
+ * @tparam string prefix the prefix of the command to be completed
+ * @treturn int code the exit status of the executed command
+ * @treturn string stdout the data written to stdout
+ * @treturn string stderr the data written to stderr
+ */
+static int complete_command(lua_State *L) {
+	Vis *vis = obj_ref_check(L, 1, "vis");
+	const char *prefix = luaL_checkstring(L, 2);
+	char *out = NULL, *err = NULL;
+
+	Buffer buf = {0};
+	vis_print_cmds(vis, &buf, prefix);
+	int status = vis_pipe_buf_collect(vis, buffer_content0(&buf), (const char*[]){"vis-menu", "-b", 0},
+	                                  &out, &err, false);
+
+	lua_pushinteger(L, status);
+	if (out) lua_pushstring(L, out);
+	else     lua_pushnil(L);
+	if (err) lua_pushstring(L, err);
+	else     lua_pushnil(L);
+
+	free(out);
+	free(err);
+	buffer_release(&buf);
+	return 3;
 }
 
 /***
@@ -1214,7 +1243,7 @@ static int replace(lua_State *L) {
  */
 static int exit_func(lua_State *L) {
 	Vis *vis = obj_ref_check(L, 1, "vis");
-	int code = luaL_checkint(L, 2);
+	int code = luaL_checkinteger(L, 2);
 	vis_exit(vis, code);
 	return 0;
 }
@@ -1397,7 +1426,7 @@ static int vis_index(lua_State *L) {
 		}
 
 		if (strcmp(key, "mode") == 0) {
-			lua_pushunsigned(L, vis->mode->id);
+			lua_pushinteger(L, vis->mode->id);
 			return 1;
 		}
 
@@ -1416,7 +1445,7 @@ static int vis_index(lua_State *L) {
 			if (count == VIS_COUNT_UNKNOWN)
 				lua_pushnil(L);
 			else
-				lua_pushunsigned(L, count);
+				lua_pushinteger(L, count);
 			return 1;
 		}
 
@@ -1457,7 +1486,7 @@ static int vis_options_assign(Vis *vis, lua_State *L, const char *key, int next)
 	} else if (strcmp(key, "changecolors") == 0) {
 		vis->change_colors = lua_toboolean(L, next);
 	} else if (strcmp(key, "escdelay") == 0) {
-		termkey_set_waittime(vis->ui.termkey, luaL_checkint(L, next));
+		termkey_set_waittime(vis->ui.termkey, luaL_checkinteger(L, next));
 	} else if (strcmp(key, "ignorecase") == 0 || strcmp(key, "ic") == 0) {
 		vis->ignorecase = lua_toboolean(L, next);
 	} else if (strcmp(key, "loadmethod") == 0) {
@@ -1483,7 +1512,7 @@ static int vis_newindex(lua_State *L) {
 	if (lua_isstring(L, 2)) {
 		const char *key = lua_tostring(L, 2);
 		if (strcmp(key, "mode") == 0) {
-			enum VisMode mode = luaL_checkunsigned(L, 3);
+			enum VisMode mode = luaL_checkinteger(L, 3);
 			vis_mode_switch(vis, mode);
 			return 0;
 		}
@@ -1493,7 +1522,7 @@ static int vis_newindex(lua_State *L) {
 			if (lua_isnil(L, 3))
 				count = VIS_COUNT_UNKNOWN;
 			else
-				count = luaL_checkunsigned(L, 3);
+				count = luaL_checkinteger(L, 3);
 			vis->action.count = count;
 			return 0;
 		}
@@ -1559,6 +1588,7 @@ static const struct luaL_Reg vis_lua[] = {
 	{ "option_register", option_register },
 	{ "option_unregister", option_unregister },
 	{ "command_register", command_register },
+	{ "complete_command", complete_command },
 	{ "feedkeys", feedkeys },
 	{ "insert", insert },
 	{ "replace", replace },
@@ -1597,7 +1627,7 @@ static int vis_options_index(lua_State *L) {
 			lua_pushboolean(L, vis->change_colors);
 			return 1;
 		} else if (strcmp(key, "escdelay") == 0) {
-			lua_pushunsigned(L, termkey_get_waittime(vis->ui.termkey));
+			lua_pushinteger(L, termkey_get_waittime(vis->ui.termkey));
 			return 1;
 		} else if (strcmp(key, "ignorecase") == 0 || strcmp(key, "ic") == 0) {
 			lua_pushboolean(L, vis->ignorecase);
@@ -1605,13 +1635,13 @@ static int vis_options_index(lua_State *L) {
 		} else if (strcmp(key, "loadmethod") == 0) {
 			switch (vis->load_method) {
 			case TEXT_LOAD_AUTO:
-				lua_pushstring(L, "auto");
+				lua_pushliteral(L, "auto");
 				break;
 			case TEXT_LOAD_READ:
-				lua_pushstring(L, "read");
+				lua_pushliteral(L, "read");
 				break;
 			case TEXT_LOAD_MMAP:
-				lua_pushstring(L, "mmap");
+				lua_pushliteral(L, "mmap");
 				break;
 			}
 			return 1;
@@ -1659,7 +1689,7 @@ static int ui_index(lua_State *L) {
 		const char *key  = lua_tostring(L, 2);
 
 		if (strcmp(key, "layout") == 0) {
-			lua_pushunsigned(L, ui->layout);
+			lua_pushinteger(L, ui->layout);
 			return 1;
 		}
 	}
@@ -1674,7 +1704,7 @@ static int ui_newindex(lua_State *L) {
 		const char *key  = lua_tostring(L, 2);
 
 		if (strcmp(key, "layout") == 0) {
-			ui_arrange(ui, luaL_checkint(L, 3));
+			ui_arrange(ui, luaL_checkinteger(L, 3));
 			return 0;
 		}
 	}
@@ -1696,14 +1726,14 @@ static int registers_index(lua_State *L) {
 	enum VisRegister reg = vis_register_from(vis, symbol[0]);
 	if (reg >= VIS_REG_INVALID)
 		return 1;
-	Array data = vis_register_get(vis, reg);
-	for (size_t i = 0, len = data.len; i < len; i++) {
-		TextString *string = array_get(&data, i);
-		lua_pushunsigned(L, i+1);
-		lua_pushlstring(L, string->data, string->len);
+	str8_list strings = vis_register_get(vis, reg);
+	for (VisDACount i = 0; i < strings.count; i++) {
+		str8 string = strings.data[i];
+		lua_pushinteger(L, i+1);
+		lua_pushlstring(L, (char *)string.data, string.length);
 		lua_settable(L, -3);
 	}
-	array_release(&data);
+	da_release(&strings);
 	return 1;
 }
 
@@ -1713,27 +1743,28 @@ static int registers_newindex(lua_State *L) {
 	if (strlen(symbol) != 1)
 		return 0;
 	enum VisRegister reg = vis_register_from(vis, symbol[0]);
-	Array data;
-	array_init_sized(&data, sizeof(TextString));
 
+	str8_list strings = {0};
 	if (lua_istable(L, 3)) {
 		lua_pushnil(L);
 		while (lua_next(L, 3)) {
-			TextString string;
-			string.data = luaL_checklstring(L, -1, &string.len);
-			array_add(&data, &string);
+			size_t length;
+			str8   string;
+			string.data   = (uint8_t *)luaL_checklstring(L, -1, &length);
+			string.length = (ptrdiff_t)length;
+			*da_push(vis, &strings) = string;
 			lua_pop(L, 1);
 		}
 	}
 
-	vis_register_set(vis, reg, &data);
-	array_release(&data);
+	vis_register_set(vis, reg, strings);
+	da_release(&strings);
 	return 0;
 }
 
 static int registers_len(lua_State *L) {
 	Vis *vis = lua_touserdata(L, lua_upvalueindex(1));
-	lua_pushunsigned(L, LENGTH(vis->registers));
+	lua_pushinteger(L, LENGTH(vis->registers));
 	return 1;
 }
 
@@ -1800,28 +1831,28 @@ static int window_index(lua_State *L) {
 			l.end   = win->view.lastline->lineno;
 
 			lua_createtable(L, 0, 4);
-			lua_pushstring(L, "bytes");
+			lua_pushliteral(L, "bytes");
 			pushrange(L, &b);
 			lua_settable(L, -3);
-			lua_pushstring(L, "lines");
+			lua_pushliteral(L, "lines");
 			pushrange(L, &l);
 			lua_settable(L, -3);
-			lua_pushstring(L, "width");
-			lua_pushunsigned(L, win->view.width);
+			lua_pushliteral(L, "width");
+			lua_pushinteger(L, win->view.width);
 			lua_settable(L, -3);
-			lua_pushstring(L, "height");
-			lua_pushunsigned(L, win->view.height);
+			lua_pushliteral(L, "height");
+			lua_pushinteger(L, win->view.height);
 			lua_settable(L, -3);
 			return 1;
 		}
 
 		if (strcmp(key, "width") == 0) {
-			lua_pushunsigned(L, win->width);
+			lua_pushinteger(L, win->width);
 			return 1;
 		}
 
 		if (strcmp(key, "height") == 0) {
-			lua_pushunsigned(L, win->height);
+			lua_pushinteger(L, win->height);
 			return 1;
 		}
 
@@ -1860,7 +1891,7 @@ static int window_options_assign(Win *win, lua_State *L, const char *key, int ne
 		if (lua_isstring(L, next))
 			view_breakat_set(&win->view, lua_tostring(L, next));
 	} else if (strcmp(key, "colorcolumn") == 0 || strcmp(key, "cc") == 0) {
-		win->view.colorcolumn = luaL_checkunsigned(L, next);
+		win->view.colorcolumn = luaL_checkinteger(L, next);
 	} else if (strcmp(key, "cursorline") == 0 || strcmp(key, "cul") == 0) {
 		if (lua_toboolean(L, next))
 			flags |= UI_OPTION_CURSOR_LINE;
@@ -1910,9 +1941,9 @@ static int window_options_assign(Win *win, lua_State *L, const char *key, int ne
 			flags &= ~UI_OPTION_STATUSBAR;
 		win_options_set(win, flags);
 	} else if (strcmp(key, "wrapcolumn") == 0 || strcmp(key, "wc") == 0) {
-		win->view.wrapcolumn = luaL_checkunsigned(L, next);
+		win->view.wrapcolumn = luaL_checkinteger(L, next);
 	} else if (strcmp(key, "tabwidth") == 0 || strcmp(key, "tw") == 0) {
-		view_tabwidth_set(&win->view, luaL_checkint(L, next));
+		view_tabwidth_set(&win->view, luaL_checkinteger(L, next));
 	} else if (strcmp(key, "expandtab") == 0 || strcmp(key, "et") == 0) {
 		win->expandtab = lua_toboolean(L, next);
 	}
@@ -2014,7 +2045,7 @@ static int window_unmap(lua_State *L) {
  */
 static int window_style_define(lua_State *L) {
 	Win *win = obj_ref_check(L, 1, VIS_LUA_TYPE_WINDOW);
-	enum UiStyle id = luaL_checkunsigned(L, 2);
+	enum UiStyle id = luaL_checkinteger(L, 2);
 	const char *style = luaL_checkstring(L, 3);
 	bool ret = ui_style_define(win, id, style);
 	lua_pushboolean(L, ret);
@@ -2036,7 +2067,7 @@ static int window_style_define(lua_State *L) {
  */
 static int window_style(lua_State *L) {
 	Win *win = obj_ref_check(L, 1, VIS_LUA_TYPE_WINDOW);
-	enum UiStyle style = luaL_checkunsigned(L, 2);
+	enum UiStyle style = luaL_checkinteger(L, 2);
 	size_t start = checkpos(L, 3);
 	size_t end = checkpos(L, 4);
 	bool keep_non_default = lua_isboolean(L, 5) && lua_toboolean(L, 5);
@@ -2063,7 +2094,7 @@ static int window_style(lua_State *L) {
  */
 static int window_style_pos(lua_State *L) {
 	Win *win = obj_ref_check(L, 1, VIS_LUA_TYPE_WINDOW);
-	enum UiStyle style = luaL_checkunsigned(L, 2);
+	enum UiStyle style = luaL_checkinteger(L, 2);
 	size_t x = checkpos(L, 3);
 	size_t y = checkpos(L, 4);
 	bool keep_non_default = lua_isboolean(L, 5) && lua_toboolean(L, 5);
@@ -2177,7 +2208,7 @@ static int window_options_index(lua_State *L) {
 			lua_pushstring(L, win->view.breakat);
 			return 1;
 		} else if (strcmp(key, "colorcolumn") == 0 || strcmp(key, "cc") == 0) {
-			lua_pushunsigned(L, win->view.colorcolumn);
+			lua_pushinteger(L, win->view.colorcolumn);
 			return 1;
 		} else if (strcmp(key, "cursorline") == 0 || strcmp(key, "cul") == 0) {
 			lua_pushboolean(L, win->options & UI_OPTION_CURSOR_LINE);
@@ -2210,7 +2241,7 @@ static int window_options_index(lua_State *L) {
 			lua_pushinteger(L, win->view.tabwidth);
 			return 1;
 		} else if (strcmp(key, "wrapcolumn") == 0 || strcmp(key, "wc") == 0) {
-			lua_pushunsigned(L, win->view.wrapcolumn);
+			lua_pushinteger(L, win->view.wrapcolumn);
 			return 1;
 		}
 	}
@@ -2234,7 +2265,7 @@ static const struct luaL_Reg window_option_funcs[] = {
 
 static int window_selections_index(lua_State *L) {
 	View *view = obj_ref_check(L, 1, VIS_LUA_TYPE_SELECTIONS);
-	size_t index = luaL_checkunsigned(L, 2);
+	size_t index = luaL_checkinteger(L, 2);
 	size_t count = view->selection_count;
 	if (index == 0 || index > count)
 		goto err;
@@ -2251,7 +2282,7 @@ err:
 
 static int window_selections_len(lua_State *L) {
 	View *view = obj_ref_check(L, 1, VIS_LUA_TYPE_SELECTIONS);
-	lua_pushunsigned(L, view->selection_count);
+	lua_pushinteger(L, view->selection_count);
 	return 1;
 }
 
@@ -2374,17 +2405,17 @@ static int window_selection_index(lua_State *L) {
 		}
 
 		if (strcmp(key, "line") == 0) {
-			lua_pushunsigned(L, view_cursors_line(sel));
+			lua_pushinteger(L, view_cursors_line(sel));
 			return 1;
 		}
 
 		if (strcmp(key, "col") == 0) {
-			lua_pushunsigned(L, view_cursors_col(sel));
+			lua_pushinteger(L, view_cursors_col(sel));
 			return 1;
 		}
 
 		if (strcmp(key, "number") == 0) {
-			lua_pushunsigned(L, view_selections_number(sel)+1);
+			lua_pushinteger(L, view_selections_number(sel)+1);
 			return 1;
 		}
 
@@ -2533,7 +2564,7 @@ static int file_index(lua_State *L) {
 		}
 
 		if (strcmp(key, "size") == 0) {
-			lua_pushunsigned(L, text_size(file->text));
+			lua_pushinteger(L, text_size(file->text));
 			return 1;
 		}
 
@@ -2544,20 +2575,20 @@ static int file_index(lua_State *L) {
 
 		if (strcmp(key, "permission") == 0) {
 			struct stat stat = text_stat(file->text);
-			lua_pushunsigned(L, stat.st_mode & 0777);
+			lua_pushinteger(L, stat.st_mode & 0777);
 			return 1;
 		}
 
 		if (strcmp(key, "savemethod") == 0) {
 			switch (file->save_method) {
 			case TEXT_SAVE_AUTO:
-				lua_pushstring(L, "auto");
+				lua_pushliteral(L, "auto");
 				break;
 			case TEXT_SAVE_ATOMIC:
-				lua_pushstring(L, "atomic");
+				lua_pushliteral(L, "atomic");
 				break;
 			case TEXT_SAVE_INPLACE:
-				lua_pushstring(L, "inplace");
+				lua_pushliteral(L, "inplace");
 				break;
 			}
 			return 1;
@@ -2567,7 +2598,9 @@ static int file_index(lua_State *L) {
 	return index_common(L);
 }
 
-static int file_newindex(lua_State *L) {
+static int file_newindex(lua_State *L)
+{
+	Vis  *vis  = lua_get_vis(L);
 	File *file = obj_ref_check(L, 1, VIS_LUA_TYPE_FILE);
 
 	if (lua_isstring(L, 2)) {
@@ -2576,10 +2609,10 @@ static int file_newindex(lua_State *L) {
 		if (strcmp(key, "modified") == 0) {
 			bool modified = lua_isboolean(L, 3) && lua_toboolean(L, 3);
 			if (modified) {
-				text_insert(file->text, 0, " ", 1);
+				text_insert(vis, file->text, 0, " ", 1);
 				text_delete(file->text, 0, 1);
 			} else {
-				text_save(file->text, NULL);
+				text_mark_current_revision(file->text);
 			}
 			return 0;
 		}
@@ -2608,13 +2641,15 @@ static int file_newindex(lua_State *L) {
  * @tparam string data the data to insert
  * @treturn bool whether the file content was successfully changed
  */
-static int file_insert(lua_State *L) {
+static int file_insert(lua_State *L)
+{
+	Vis  *vis  = lua_get_vis(L);
 	File *file = obj_ref_check(L, 1, VIS_LUA_TYPE_FILE);
 	size_t pos = checkpos(L, 2);
 	size_t len;
 	luaL_checkstring(L, 3);
 	const char *data = lua_tolstring(L, 3, &len);
-	lua_pushboolean(L, text_insert(file->text, pos, data, len));
+	lua_pushboolean(L, text_insert(vis, file->text, pos, data, len));
 	return 1;
 }
 
@@ -2641,6 +2676,17 @@ static int file_delete(lua_State *L) {
 }
 
 /***
+ * Create a restore point for undo/redo.
+ *
+ * @function snapshot
+ */
+static int file_snapshot(lua_State *L) {
+	File *file = obj_ref_check(L, 1, VIS_LUA_TYPE_FILE);
+	text_snapshot(file->text);
+	return 0;
+}
+
+/***
  * Create an iterator over all lines of the file.
  *
  * For large files this is probably faster than @{lines}.
@@ -2655,7 +2701,7 @@ static int file_delete(lua_State *L) {
 static int file_lines_iterator_it(lua_State *L);
 static int file_lines_iterator(lua_State *L) {
 	File *file = obj_ref_check(L, 1, VIS_LUA_TYPE_FILE);
-	size_t line = luaL_optunsigned(L, 2, 1);
+	size_t line = luaL_optinteger(L, 2, 1);
 	size_t *pos = lua_newuserdata(L, sizeof *pos);
 	*pos = text_pos_by_lineno(file->text, line);
 	lua_pushcclosure(L, file_lines_iterator_it, 2);
@@ -2744,7 +2790,7 @@ static int file_mark_get(lua_State *L) {
 	if (pos == EPOS)
 		lua_pushnil(L);
 	else
-		lua_pushunsigned(L, pos);
+		lua_pushinteger(L, pos);
 	return 1;
 }
 
@@ -2783,6 +2829,7 @@ static const struct luaL_Reg file_funcs[] = {
 	{ "__newindex", file_newindex },
 	{ "insert", file_insert },
 	{ "delete", file_delete },
+	{ "snapshot", file_snapshot },
 	{ "lines_iterator", file_lines_iterator },
 	{ "content", file_content },
 	{ "mark_set", file_mark_set },
@@ -2792,7 +2839,7 @@ static const struct luaL_Reg file_funcs[] = {
 
 static int file_lines_index(lua_State *L) {
 	Text *txt = obj_ref_check(L, 1, VIS_LUA_TYPE_TEXT);
-	size_t line = luaL_checkunsigned(L, 2);
+	size_t line = luaL_checkinteger(L, 2);
 	size_t start = text_pos_by_lineno(txt, line);
 	size_t end = text_line_end(txt, start);
 	if (start != EPOS && end != EPOS) {
@@ -2809,23 +2856,25 @@ err:
 	return 1;
 }
 
-static int file_lines_newindex(lua_State *L) {
+static int file_lines_newindex(lua_State *L)
+{
+	Vis  *vis = lua_get_vis(L);
 	Text *txt = obj_ref_check(L, 1, VIS_LUA_TYPE_TEXT);
-	size_t line = luaL_checkunsigned(L, 2);
+	size_t line = luaL_checkinteger(L, 2);
 	size_t size;
 	const char *data = luaL_checklstring(L, 3, &size);
 	if (line == 0) {
-		text_insert(txt, 0, data, size);
-		text_insert(txt, size, "\n", 1);
+		text_insert(vis, txt, 0, data, size);
+		text_insert(vis, txt, size, "\n", 1);
 		return 0;
 	}
 	size_t start = text_pos_by_lineno(txt, line);
 	size_t end = text_line_end(txt, start);
 	if (start != EPOS && end != EPOS) {
 		text_delete(txt, start, end - start);
-		text_insert(txt, start, data, size);
+		text_insert(vis, txt, start, data, size);
 		if (text_size(txt) == start + size)
-			text_insert(txt, text_size(txt), "\n", 1);
+			text_insert(vis, txt, text_size(txt), "\n", 1);
 	}
 	return 0;
 }
@@ -2839,7 +2888,7 @@ static int file_lines_len(lua_State *L) {
 		lines = text_lineno_by_pos(txt, size);
 	if (lines > 1 && text_byte_get(txt, size-1, &lastchar) && lastchar == '\n')
 		lines--;
-	lua_pushunsigned(L, lines);
+	lua_pushinteger(L, lines);
 	return 1;
 }
 
@@ -2863,14 +2912,13 @@ static int window_marks_index(lua_State *L) {
 	if (mark == VIS_MARK_INVALID)
 		return 1;
 
-	Array arr = vis_mark_get(win, mark);
-	for (size_t i = 0, len = arr.len; i < len; i++) {
-		Filerange *range = array_get(&arr, i);
-		lua_pushunsigned(L, i+1);
-		pushrange(L, range);
+	FilerangeList ranges = vis_mark_get(vis, win, mark);
+	for (VisDACount i = 0; i < ranges.count; i++) {
+		lua_pushinteger(L, i+1);
+		pushrange(L, ranges.data + i);
 		lua_settable(L, -3);
 	}
-	array_release(&arr);
+	da_release(&ranges);
 	return 1;
 }
 
@@ -2886,26 +2934,25 @@ static int window_marks_newindex(lua_State *L) {
 	if (mark == VIS_MARK_INVALID)
 		return 0;
 
-	Array ranges;
-	array_init_sized(&ranges, sizeof(Filerange));
+	FilerangeList ranges = {0};
 
 	if (lua_istable(L, 3)) {
 		lua_pushnil(L);
 		while (lua_next(L, 3)) {
 			Filerange range = getrange(L, -1);
 			if (text_range_valid(&range))
-				array_add(&ranges, &range);
+				*da_push(vis, &ranges) = range;
 			lua_pop(L, 1);
 		}
 	}
 
-	vis_mark_set(win, mark, &ranges);
-	array_release(&ranges);
+	vis_mark_set(vis, win, mark, ranges);
+	da_release(&ranges);
 	return 0;
 }
 
 static int window_marks_len(lua_State *L) {
-	lua_pushunsigned(L, VIS_MARK_INVALID);
+	lua_pushinteger(L, VIS_MARK_INVALID);
 	return 1;
 }
 
@@ -3087,10 +3134,9 @@ bool vis_lua_path_add(Vis *vis, const char *path) {
 	return true;
 }
 
-bool vis_lua_paths_get(Vis *vis, char **lpath, char **cpath) {
+bool vis_lua_paths_get(Vis *vis, char **lpath, char **cpath)
+{
 	lua_State *L = vis->lua;
-	if (!L)
-		return false;
 	const char *s;
 	lua_getglobal(L, "package");
 	lua_getfield(L, -1, "path");
@@ -3102,7 +3148,8 @@ bool vis_lua_paths_get(Vis *vis, char **lpath, char **cpath) {
 	return true;
 }
 
-static bool package_exist(Vis *vis, lua_State *L, const char *name) {
+static bool package_exist(Vis *vis, lua_State *L, str8 name)
+{
 	const char lua[] =
 		"local name = ...\n"
 		"for _, searcher in ipairs(package.searchers or package.loaders) do\n"
@@ -3114,7 +3161,7 @@ static bool package_exist(Vis *vis, lua_State *L, const char *name) {
 		"return false\n";
 	if (luaL_loadstring(L, lua) != LUA_OK)
 		return false;
-	lua_pushstring(L, name);
+	lua_pushlstring(L, (char *)name.data, name.length);
 	/* an error indicates package exists */
 	bool ret = lua_pcall(L, 1, 1, 0) != LUA_OK || lua_toboolean(L, -1);
 	lua_pop(L, 1);
@@ -3139,10 +3186,17 @@ static void *alloc_lua(void *ud, void *ptr, size_t osize, size_t nsize) {
  * Can be used to set *global* configuration options.
  * @function init
  */
-static void vis_lua_init(Vis *vis) {
-	lua_State *L = lua_newstate(alloc_lua, vis);
-	if (!L)
-		return;
+static void vis_lua_init(Vis *vis)
+{
+	lua_State *L;
+	#if LUA_VERSION_NUM >= 505
+	L = lua_newstate(alloc_lua, vis, luaL_makeseed(0));
+	#else
+	L = lua_newstate(alloc_lua, vis);
+	#endif
+
+	if (!L) vis_die(vis, "Failed to start Lua\n");
+
 	vis->lua = L;
 	lua_atpanic(L, &panic_handler);
 
@@ -3193,17 +3247,11 @@ static void vis_lua_init(Vis *vis) {
 
 	ssize_t len = readlink("/proc/self/exe", path, sizeof(path)-1);
 	if (len > 0) {
-		path[len] = '\0';
-		/* some idiotic dirname(3) implementations return pointers to statically
-		 * allocated memory, hence we use memmove to copy it back */
-		char *dir = dirname(path);
-		if (dir) {
-			size_t len = strlen(dir)+1;
-			if (len < sizeof(path) - sizeof("/lua")) {
-				memmove(path, dir, len);
-				strcat(path, "/lua");
-				vis_lua_path_add(vis, path);
-			}
+		str8 dir, tail = str8("/lua");
+		path_split((str8){.length = len, .data = (uint8_t *)path}, &dir, 0);
+		if (dir.length + tail.length + 1 < sizeof(path)) {
+			memcpy(path + dir.length, tail.data, tail.length + 1);
+			vis_lua_path_add(vis, path);
 		}
 	}
 
@@ -3219,7 +3267,7 @@ static void vis_lua_init(Vis *vis) {
 	lua_newtable(L);
 	lua_setfield(L, LUA_REGISTRYINDEX, "vis.functions");
 	/* metatable used to type check user data */
-	obj_type_new(L, VIS_LUA_TYPE_VIS);
+	obj_type_new(L, str8(VIS_LUA_TYPE_VIS));
 	luaL_setfuncs(L, vis_lua, 0);
 	lua_newtable(L);
 	lua_setfield(L, -2, "types");
@@ -3229,7 +3277,7 @@ static void vis_lua_init(Vis *vis) {
 	obj_ref_new(L, vis, "vis");
 	lua_setglobal(L, "vis");
 
-	obj_type_new(L, VIS_LUA_TYPE_FILE);
+	obj_type_new(L, str8(VIS_LUA_TYPE_FILE));
 
 	const struct {
 		enum VisTextObject id;
@@ -3240,16 +3288,16 @@ static void vis_lua_init(Vis *vis) {
 	};
 
 	for (size_t i = 0; i < LENGTH(textobjects); i++) {
-		lua_pushunsigned(L, textobjects[i].id);
+		lua_pushinteger(L, textobjects[i].id);
 		lua_pushcclosure(L, file_text_object, 1);
 		lua_setfield(L, -2, textobjects[i].name);
 	}
 
 	luaL_setfuncs(L, file_funcs, 0);
 
-	obj_type_new(L, VIS_LUA_TYPE_TEXT);
+	obj_type_new(L, str8(VIS_LUA_TYPE_TEXT));
 	luaL_setfuncs(L, file_lines_funcs, 0);
-	obj_type_new(L, VIS_LUA_TYPE_WINDOW);
+	obj_type_new(L, str8(VIS_LUA_TYPE_WINDOW));
 	luaL_setfuncs(L, window_funcs, 0);
 
 	const struct {
@@ -3270,29 +3318,30 @@ static void vis_lua_init(Vis *vis) {
 		{ UI_STYLE_SEPARATOR,         "STYLE_SEPARATOR"         },
 		{ UI_STYLE_INFO,              "STYLE_INFO"              },
 		{ UI_STYLE_EOF,               "STYLE_EOF"               },
+		{ UI_STYLE_WHITESPACE,        "STYLE_WHITESPACE"        },
 	};
 
 	for (size_t i = 0; i < LENGTH(styles); i++) {
-		lua_pushunsigned(L, styles[i].id);
+		lua_pushinteger(L, styles[i].id);
 		lua_setfield(L, -2, styles[i].name);
 	}
 
-	obj_type_new(L, VIS_LUA_TYPE_WIN_OPTS);
+	obj_type_new(L, str8(VIS_LUA_TYPE_WIN_OPTS));
 	luaL_setfuncs(L, window_option_funcs, 0);
 
-	obj_type_new(L, VIS_LUA_TYPE_MARK);
-	obj_type_new(L, VIS_LUA_TYPE_MARKS);
+	obj_type_new(L, str8(VIS_LUA_TYPE_MARK));
+	obj_type_new(L, str8(VIS_LUA_TYPE_MARKS));
 	lua_pushlightuserdata(L, vis);
 	luaL_setfuncs(L, window_marks_funcs, 1);
 
-	obj_type_new(L, VIS_LUA_TYPE_SELECTION);
+	obj_type_new(L, str8(VIS_LUA_TYPE_SELECTION));
 	luaL_setfuncs(L, window_selection_funcs, 0);
-	obj_type_new(L, VIS_LUA_TYPE_SELECTIONS);
+	obj_type_new(L, str8(VIS_LUA_TYPE_SELECTIONS));
 	luaL_setfuncs(L, window_selections_funcs, 0);
 
-	obj_type_new(L, VIS_LUA_TYPE_UI);
+	obj_type_new(L, str8(VIS_LUA_TYPE_UI));
 	luaL_setfuncs(L, ui_funcs, 0);
-	lua_pushunsigned(L, ui_terminal_colors());
+	lua_pushinteger(L, ui_terminal_colors());
 	lua_setfield(L, -2, "colors");
 	lua_newtable(L);
 	static const struct {
@@ -3303,21 +3352,21 @@ static void vis_lua_init(Vis *vis) {
 		{ UI_LAYOUT_VERTICAL, "VERTICAL" },
 	};
 	for (size_t i = 0; i <  LENGTH(layouts); i++) {
-		lua_pushunsigned(L, layouts[i].id);
+		lua_pushinteger(L, layouts[i].id);
 		lua_setfield(L, -2, layouts[i].name);
 	}
 	lua_setfield(L, -2, "layouts");
 
-	obj_type_new(L, VIS_LUA_TYPE_REGISTERS);
+	obj_type_new(L, str8(VIS_LUA_TYPE_REGISTERS));
 	lua_pushlightuserdata(L, vis);
 	luaL_setfuncs(L, registers_funcs, 1);
 
-	obj_type_new(L, VIS_LUA_TYPE_KEYACTION);
+	obj_type_new(L, str8(VIS_LUA_TYPE_KEYACTION));
 
 	lua_getglobal(L, "vis");
 	lua_getmetatable(L, -1);
 
-	lua_pushstring(L, VERSION);
+	lua_pushliteral(L, VERSION);
 	lua_setfield(L, -2, "VERSION");
 
 	lua_newtable(L);
@@ -3333,19 +3382,19 @@ static void vis_lua_init(Vis *vis) {
 		{ VIS_MODE_REPLACE,          "REPLACE"          },
 	};
 	for (size_t i = 0; i < LENGTH(modes); i++) {
-		lua_pushunsigned(L, modes[i].id);
+		lua_pushinteger(L, modes[i].id);
 		lua_setfield(L, -2, modes[i].name);
 	}
 	lua_setfield(L, -2, "modes");
 
-	obj_type_new(L, VIS_LUA_TYPE_VIS_OPTS);
+	obj_type_new(L, str8(VIS_LUA_TYPE_VIS_OPTS));
 	luaL_setfuncs(L, vis_option_funcs, 0);
 
-	if (!package_exist(vis, L, "visrc")) {
+	if (!package_exist(vis, L, str8("visrc"))) {
 		vis_info_show(vis, "WARNING: failed to load visrc.lua");
 	} else {
 		lua_getglobal(L, "require");
-		lua_pushstring(L, "visrc");
+		lua_pushliteral(L, "visrc");
 		pcall(vis, L, 1, 0);
 		vis_lua_event_call(vis, "init");
 	}
@@ -3367,8 +3416,6 @@ static void vis_lua_start(Vis *vis) {
  * @function quit
  */
 static void vis_lua_quit(Vis *vis) {
-	if (!vis->lua)
-		return;
 	vis_lua_event_call(vis, "quit");
 	lua_close(vis->lua);
 	vis->lua = NULL;
@@ -3381,10 +3428,10 @@ static void vis_lua_quit(Vis *vis) {
  * @treturn bool whether the key was consumed or not
  */
 static bool vis_lua_input(Vis *vis, const char *key, size_t len) {
-	lua_State *L = vis->lua;
-	if (!L || !vis->win || vis->win->file->internal)
+	if (!vis->win || vis->win->file->internal)
 		return false;
 	bool ret = false;
+	lua_State *L = vis->lua;
 	vis_lua_event_get(L, "input");
 	if (lua_isfunction(L, -1)) {
 		lua_pushlstring(L, key, len);
@@ -3415,8 +3462,6 @@ void vis_event_mode_replace_input(Vis *vis, const char *key, size_t len) {
 static void vis_lua_file_open(Vis *vis, File *file) {
 	debug("event: file-open: %s %p %p\n", file->name ? file->name : "unnamed", (void*)file, (void*)file->text);
 	lua_State *L = vis->lua;
-	if (!L)
-		return;
 	vis_lua_event_get(L, "file_open");
 	if (lua_isfunction(L, -1)) {
 		obj_ref_new(L, file, VIS_LUA_TYPE_FILE);
@@ -3435,8 +3480,6 @@ static void vis_lua_file_open(Vis *vis, File *file) {
  */
 static bool vis_lua_file_save_pre(Vis *vis, File *file, const char *path) {
 	lua_State *L = vis->lua;
-	if (!L)
-		return true;
 	vis_lua_event_get(L, "file_save_pre");
 	if (lua_isfunction(L, -1)) {
 		obj_ref_new(L, file, VIS_LUA_TYPE_FILE);
@@ -3458,8 +3501,6 @@ static bool vis_lua_file_save_pre(Vis *vis, File *file, const char *path) {
  */
 static void vis_lua_file_save_post(Vis *vis, File *file, const char *path) {
 	lua_State *L = vis->lua;
-	if (!L)
-		return;
 	vis_lua_event_get(L, "file_save_post");
 	if (lua_isfunction(L, -1)) {
 		obj_ref_new(L, file, VIS_LUA_TYPE_FILE);
@@ -3478,8 +3519,6 @@ static void vis_lua_file_save_post(Vis *vis, File *file, const char *path) {
 static void vis_lua_file_close(Vis *vis, File *file) {
 	debug("event: file-close: %s %p %p\n", file->name ? file->name : "unnamed", (void*)file, (void*)file->text);
 	lua_State *L = vis->lua;
-	if (!L)
-		return;
 	vis_lua_event_get(L, "file_close");
 	if (lua_isfunction(L, -1)) {
 		obj_ref_new(L, file, VIS_LUA_TYPE_FILE);
@@ -3500,8 +3539,6 @@ static void vis_lua_file_close(Vis *vis, File *file) {
 static void vis_lua_win_open(Vis *vis, Win *win) {
 	debug("event: win-open: %s %p %p\n", win->file->name ? win->file->name : "unnamed", (void*)win, (void*)win->view);
 	lua_State *L = vis->lua;
-	if (!L)
-		return;
 	vis_lua_event_get(L, "win_open");
 	if (lua_isfunction(L, -1)) {
 		obj_ref_new(L, win, VIS_LUA_TYPE_WINDOW);
@@ -3519,8 +3556,6 @@ static void vis_lua_win_open(Vis *vis, Win *win) {
 static void vis_lua_win_close(Vis *vis, Win *win) {
 	debug("event: win-close: %s %p %p\n", win->file->name ? win->file->name : "unnamed", (void*)win, (void*)win->view);
 	lua_State *L = vis->lua;
-	if (!L)
-		return;
 	vis_lua_event_get(L, "win_close");
 	if (lua_isfunction(L, -1)) {
 		obj_ref_new(L, win, VIS_LUA_TYPE_WINDOW);
@@ -3540,8 +3575,6 @@ static void vis_lua_win_close(Vis *vis, Win *win) {
  */
 static void vis_lua_win_highlight(Vis *vis, Win *win) {
 	lua_State *L = vis->lua;
-	if (!L)
-		return;
 	vis_lua_event_get(L, "win_highlight");
 	if (lua_isfunction(L, -1)) {
 		obj_ref_new(L, win, VIS_LUA_TYPE_WINDOW);
@@ -3556,12 +3589,14 @@ static void vis_lua_win_highlight(Vis *vis, Win *win) {
  * @tparam Window win the affected window
  * @see status
  */
-static void vis_lua_win_status(Vis *vis, Win *win) {
-	lua_State *L = vis->lua;
-	if (!L || win->file->internal) {
+static void vis_lua_win_status(Vis *vis, Win *win)
+{
+	if (win->file->internal) {
 		window_status_update(vis, win);
 		return;
 	}
+
+	lua_State *L = vis->lua;
 	vis_lua_event_get(L, "win_status");
 	if (lua_isfunction(L, -1)) {
 		obj_ref_new(L, win, VIS_LUA_TYPE_WINDOW);
@@ -3579,8 +3614,6 @@ static void vis_lua_win_status(Vis *vis, Win *win) {
  */
 static void vis_lua_term_csi(Vis *vis, const long *csi) {
 	lua_State *L = vis->lua;
-	if (!L)
-		return;
 	vis_lua_event_get(L, "term_csi");
 	if (lua_isfunction(L, -1)) {
 		int nargs = csi[1];
@@ -3599,20 +3632,17 @@ static void vis_lua_term_csi(Vis *vis, const long *csi) {
  * @tparam int code the exit code number if response_type is "EXIT", or the signal number if response_type is "SIGNAL"
  * @tparam string buffer the available content sent by the process
  */
-void vis_lua_process_response(Vis *vis, const char *name,
-                              char *buffer, size_t len, ResponseType rtype) {
+void vis_lua_process_response(Vis *vis, const char *name, char *buffer, size_t len, ResponseType rtype)
+{
 	lua_State *L = vis->lua;
-	if (!L) {
-		return;
-	}
 	vis_lua_event_get(L, "process_response");
 	if (lua_isfunction(L, -1)) {
 		lua_pushstring(L, name);
 		switch (rtype) {
-		case STDOUT: lua_pushstring(L, "STDOUT"); break;
-		case STDERR: lua_pushstring(L, "STDERR"); break;
-		case SIGNAL: lua_pushstring(L, "SIGNAL"); break;
-		case EXIT: lua_pushstring(L, "EXIT"); break;
+		case EXIT:   lua_pushliteral(L, "EXIT");   break;
+		case SIGNAL: lua_pushliteral(L, "SIGNAL"); break;
+		case STDERR: lua_pushliteral(L, "STDERR"); break;
+		case STDOUT: lua_pushliteral(L, "STDOUT"); break;
 		}
 		switch (rtype) {
 		case EXIT:
@@ -3674,13 +3704,15 @@ bool vis_event_emit(Vis *vis, enum VisEvents id, ...) {
 		}
 		break;
 	}
+
+	case VIS_EVENT_WIN_STATUS:{ vis_lua_win_status(vis, va_arg(ap, Win*)); }break;
+
 	case VIS_EVENT_WIN_OPEN:
 	case VIS_EVENT_WIN_CLOSE:
 	case VIS_EVENT_WIN_HIGHLIGHT:
-	case VIS_EVENT_WIN_STATUS:
 	{
 		Win *win = va_arg(ap, Win*);
-		if (win->file->internal && id != VIS_EVENT_WIN_STATUS)
+		if (win->file->internal)
 			break;
 		if (id == VIS_EVENT_WIN_OPEN) {
 			vis_lua_win_open(vis, win);
@@ -3688,8 +3720,6 @@ bool vis_event_emit(Vis *vis, enum VisEvents id, ...) {
 			vis_lua_win_close(vis, win);
 		} else if (id == VIS_EVENT_WIN_HIGHLIGHT) {
 			vis_lua_win_highlight(vis, win);
-		} else if (id == VIS_EVENT_WIN_STATUS) {
-			vis_lua_win_status(vis, win);
 		}
 		break;
 	}
